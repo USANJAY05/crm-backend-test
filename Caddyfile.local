@@ -1,0 +1,16 @@
+# Caddyfile.local — local development (no TLS, localhost only)
+# Run with: caddy run --config Caddyfile.local
+
+{
+    admin off
+}
+
+# Keycloak
+:8081 {
+    reverse_proxy keycloak:8080
+}
+
+# Express app
+:3001 {
+    reverse_proxy app:3000
+}

@@ -1,0 +1,42 @@
+# Disposable MySQL integration-test environment.
+# Usage:
+#   docker compose -f docker-compose.mysql-test.yml up -d db
+#   docker compose -f docker-compose.mysql-test.yml run --rm test
+#   docker compose -f docker-compose.mysql-test.yml down -v
+services:
+  db:
+    image: mysql:8.4
+    environment:
+      MYSQL_ROOT_PASSWORD: test-root-password
+      MYSQL_DATABASE: chiefvoice_test
+      MYSQL_USER: chiefvoice_test
+      MYSQL_PASSWORD: chiefvoice_test
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h localhost -uchiefvoice_test -pchiefvoice_test --silent"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 15s
+    networks: [mysql-test]
+
+  test:
+    image: node:22-bookworm
+    working_dir: /app
+    volumes:
+      - ./:/app
+    environment:
+      NODE_ENV: test
+      MYSQL_HOST: db
+      MYSQL_PORT: 3306
+      MYSQL_USER: chiefvoice_test
+      MYSQL_PASSWORD: chiefvoice_test
+      MYSQL_DATABASE: chiefvoice_test
+      MYSQL_INTEGRATION_TESTS: "1"
+    command: sh -lc "npm install --no-audit --no-fund && npm run test:mysql"
+    depends_on:
+      db:
+        condition: service_healthy
+    networks: [mysql-test]
+
+networks:
+  mysql-test:

@@ -1,0 +1,97 @@
+# Caddyfile.prod — production reverse proxy (JWT auth handled by backend)
+{
+    admin off
+    email admin@elvoryx.in
+
+    servers {
+        timeouts {
+            read_body   10s
+            read_header 5s
+            write       60s
+            idle        120s
+        }
+    }
+}
+
+{$DOMAIN} {
+    # ── Compression ───────────────────────────────────────────────────────────
+    encode zstd gzip
+
+    # ── Security headers ──────────────────────────────────────────────────────
+    header {
+        Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+        X-Content-Type-Options    "nosniff"
+        X-Frame-Options           "DENY"
+        X-XSS-Protection          "1; mode=block"
+        Referrer-Policy           "strict-origin-when-cross-origin"
+        Permissions-Policy        "camera=(), microphone=(), geolocation=()"
+        -Server
+        -X-Powered-By
+    }
+
+    # ── Public endpoints — no auth ────────────────────────────────────────────
+    handle /health {
+        reverse_proxy app:3000
+    }
+
+    handle /docs* {
+        reverse_proxy app:3000
+    }
+
+    handle /api/auth/login-url* {
+        reverse_proxy app:3000
+    }
+
+    handle /api/auth/industries* {
+        reverse_proxy app:3000
+    }
+
+    # SSE and browser voice sessions use short-lived signed tickets validated by Express
+    handle /api/logs-stream* {
+        reverse_proxy app:3000
+    }
+
+    # ── WebSocket endpoints (Twilio, Vobiz, etc.) — no HTTP auth header ───────
+    handle /session* {
+        reverse_proxy app:3000
+    }
+    handle /vobiz* {
+        reverse_proxy app:3000
+    }
+    handle /twilio* {
+        reverse_proxy app:3000
+    }
+    handle /telecmi* {
+        reverse_proxy app:3000
+    }
+    handle /piopiy* {
+        reverse_proxy app:3000
+    }
+
+    # ── All other API routes — JWT validated by Express requireAuth middleware ───
+    handle /api/* {
+        reverse_proxy app:3000 {
+            transport http {
+                dial_timeout            5s
+                response_header_timeout 30s
+                keepalive               30s
+                keepalive_idle_conns    10
+            }
+            health_uri      /health
+            health_interval 30s
+            health_timeout  5s
+            health_status   200
+
+            header_up X-Real-IP         {remote_host}
+            header_up X-Forwarded-For   {remote_host}
+            header_up X-Forwarded-Proto {scheme}
+        }
+    }
+
+    # ── Access log ────────────────────────────────────────────────────────────
+    log {
+        output stdout
+        format json
+        level  INFO
+    }
+}

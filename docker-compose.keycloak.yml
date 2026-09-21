@@ -1,0 +1,89 @@
+# docker-compose.keycloak.yml
+#
+# Adds Keycloak + Caddy to the existing stack.
+# Merge with your main docker-compose.yml:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.keycloak.yml up
+#
+# Or import the services below into your main docker-compose.yml directly.
+#
+# Required env vars (set in .env or your deploy platform):
+#   KEYCLOAK_ADMIN          — initial Keycloak admin username
+#   KEYCLOAK_ADMIN_PASSWORD — initial Keycloak admin password
+#   KC_DB_URL               — JDBC URL, e.g. jdbc:mysql://db:3306/keycloak
+#   KC_DB_USERNAME          — Keycloak DB user
+#   KC_DB_PASSWORD          — Keycloak DB password
+#   DOMAIN                  — main app domain, e.g. app.example.com
+#   AUTH_DOMAIN             — Keycloak domain,  e.g. auth.example.com
+
+services:
+  # Dev-only MySQL overlay: create the separate Keycloak database/user.
+  db:
+    environment:
+      KC_DB_NAME: ${KC_DB_NAME:-keycloak}
+      KC_DB_USER: ${KC_DB_USERNAME:-keycloak}
+      KC_DB_PASS: ${KC_DB_PASSWORD:-keycloak}
+    volumes:
+      - ./docker/mysql-init:/docker-entrypoint-initdb.d:ro
+
+  # ── Keycloak ────────────────────────────────────────────────────────────────
+  keycloak:
+    image: quay.io/keycloak/keycloak:25.0
+    restart: unless-stopped
+    command: >
+      start
+      --db=mysql
+      --db-url=${KC_DB_URL:-jdbc:mysql://db:3306/keycloak}
+      --db-username=${KC_DB_USERNAME:-keycloak}
+      --db-password=${KC_DB_PASSWORD:-keycloak}
+      --hostname=${AUTH_DOMAIN:-localhost}
+      --hostname-strict=false
+      --proxy-headers=xforwarded
+      --http-enabled=true
+      --http-port=8080
+    environment:
+      KEYCLOAK_ADMIN: ${KEYCLOAK_ADMIN}
+      KEYCLOAK_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD}
+      # Import realm on first boot (idempotent after that)
+      KC_IMPORT: /opt/keycloak/data/import/realm-export.json
+    volumes:
+      - ./keycloak/realm-export.json:/opt/keycloak/data/import/realm-export.json:ro
+      # Custom ChiefVoice login theme — mounted as a provider directory.
+      # Keycloak 25+ picks up themes from /opt/keycloak/providers/ or /opt/keycloak/themes/.
+      - ./keycloak/themes:/opt/keycloak/themes:ro
+    networks:
+      - internal
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8080/realms/chiefvoice/.well-known/openid-configuration || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+
+  # ── Caddy (reverse proxy + automatic TLS) ───────────────────────────────────
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      DOMAIN: ${DOMAIN}
+      AUTH_DOMAIN: ${AUTH_DOMAIN}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - keycloak
+    networks:
+      - internal
+
+networks:
+  internal:
+    # Joins the network defined in docker-compose.yml — do not redefine driver here.
+    external: false
+
+volumes:
+  caddy_data:
+  caddy_config:

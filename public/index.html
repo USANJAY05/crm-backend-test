@@ -1,0 +1,905 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="theme-color" content="#0a0a0f" />
+  <title>ChiefVoice — Arjun</title>
+  <style>
+    *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+
+    :root {
+      --blue:  #63b3ed;
+      --green: #68d391;
+      --red:   #fc8181;
+      --bg:    #0a0a0f;
+      --card:  rgba(255,255,255,0.04);
+      --border:rgba(255,255,255,0.08);
+    }
+
+    html, body {
+      height: 100%;
+      /* Fix iOS Safari 100vh bug */
+      height: -webkit-fill-available;
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", sans-serif;
+      background: var(--bg);
+      color: #e0e0e0;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: space-between;
+      min-height: 100vh;
+      min-height: -webkit-fill-available;
+      padding: env(safe-area-inset-top, 20px) 20px env(safe-area-inset-bottom, 20px);
+      padding-top: max(env(safe-area-inset-top), 28px);
+      padding-bottom: max(env(safe-area-inset-bottom), 28px);
+      overflow: hidden;
+      user-select: none;
+      -webkit-user-select: none;
+    }
+
+    /* ── Top bar ─────────────────────────────────────────── */
+    .topbar {
+      width: 100%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .brand {
+      font-size: 11px;
+      letter-spacing: 3px;
+      text-transform: uppercase;
+      color: #444;
+      font-weight: 500;
+    }
+
+    /* ── Middle section ──────────────────────────────────── */
+    .middle {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 20px;
+      flex: 1;
+      justify-content: center;
+    }
+
+    /* Avatar + rings */
+    .avatar-wrap {
+      position: relative;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      width: 200px;
+      height: 200px;
+    }
+
+    .ring {
+      position: absolute;
+      border-radius: 50%;
+      border: 1.5px solid rgba(99,179,237,0.15);
+      pointer-events: none;
+    }
+    .ring-1 { width: 130px; height: 130px; }
+    .ring-2 { width: 165px; height: 165px; }
+    .ring-3 { width: 200px; height: 200px; }
+
+    .speaking .ring { animation: ringpulse 2s ease-out infinite; }
+    .speaking .ring-2 { animation-delay: 0.35s; }
+    .speaking .ring-3 { animation-delay: 0.7s; }
+
+    @keyframes ringpulse {
+      0%   { opacity: 0.5; transform: scale(0.94); }
+      60%  { opacity: 0; transform: scale(1.08); }
+      100% { opacity: 0; transform: scale(1.08); }
+    }
+
+    .avatar {
+      width: 110px;
+      height: 110px;
+      border-radius: 50%;
+      background: linear-gradient(145deg, #1a3a5c, #0d1f33);
+      border: 2px solid rgba(99,179,237,0.25);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 46px;
+      position: relative;
+      z-index: 2;
+      transition: border-color 0.4s;
+      /* Prevent emoji rendering issues on some Android */
+      line-height: 1;
+    }
+    .speaking .avatar { border-color: rgba(99,179,237,0.7); }
+
+    /* Name + subtitle */
+    .agent-info { text-align: center; }
+    .agent-name {
+      font-size: 22px;
+      font-weight: 700;
+      color: #fff;
+      letter-spacing: 0.3px;
+    }
+    .agent-sub {
+      font-size: 13px;
+      color: #666;
+      margin-top: 3px;
+    }
+
+    /* Status pill */
+    .status-pill {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 20px;
+      padding: 7px 18px;
+      font-size: 13px;
+      color: #999;
+    }
+    .dot {
+      width: 7px; height: 7px;
+      border-radius: 50%;
+      background: #3a3a3a;
+      flex-shrink: 0;
+      transition: background 0.3s;
+    }
+    .dot.ready    { background: var(--green); }
+    .dot.active   { background: var(--blue); animation: blink 1.2s ease-in-out infinite; }
+    .dot.speaking { background: var(--blue); }
+    .dot.error    { background: var(--red); }
+    @keyframes blink { 0%,100%{opacity:1} 50%{opacity:0.25} }
+
+    /* Transcript */
+    .transcript-wrap {
+      width: 100%;
+      max-width: 400px;
+    }
+    .transcript-box {
+      width: 100%;
+      height: 140px;
+      overflow-y: auto;
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 12px 14px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      /* Momentum scrolling on iOS */
+      -webkit-overflow-scrolling: touch;
+      scroll-behavior: smooth;
+    }
+    .transcript-box::-webkit-scrollbar { display: none; }
+
+    .t-empty {
+      color: #333;
+      font-size: 13px;
+      text-align: center;
+      margin: auto;
+      line-height: 1.7;
+    }
+    .t-line {
+      font-size: 13px;
+      line-height: 1.5;
+      display: flex;
+      gap: 8px;
+      align-items: flex-start;
+    }
+    .t-who {
+      font-size: 10px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.6px;
+      padding-top: 2px;
+      flex-shrink: 0;
+    }
+    .t-line.user .t-who { color: var(--blue); }
+    .t-line.ai   .t-who { color: var(--green); }
+    .t-text { color: #bbb; }
+
+    /* ── Bottom section ──────────────────────────────────── */
+    .bottom {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 14px;
+      width: 100%;
+    }
+
+    /* iOS unlock notice — hidden until needed */
+    .safari-notice {
+      display: none;
+      background: rgba(99,179,237,0.08);
+      border: 1px solid rgba(99,179,237,0.2);
+      border-radius: 10px;
+      padding: 10px 16px;
+      font-size: 12px;
+      color: #aaa;
+      text-align: center;
+      max-width: 320px;
+      line-height: 1.5;
+    }
+
+    /* Big call button */
+    .btn-call {
+      width: 76px;
+      height: 76px;
+      border-radius: 50%;
+      border: none;
+      background: #22c55e;
+      font-size: 30px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: pointer;
+      /* Bigger touch target for mobile */
+      -webkit-tap-highlight-color: transparent;
+      touch-action: manipulation;
+      transition: transform 0.12s, background 0.2s;
+      /* Shadow gives depth on OLED */
+      box-shadow: 0 8px 32px rgba(34,197,94,0.35);
+    }
+    .btn-call:active { transform: scale(0.92); }
+    .btn-call.active {
+      background: #ef4444;
+      box-shadow: 0 8px 32px rgba(239,68,68,0.35);
+    }
+    .btn-call:disabled {
+      background: #2a2a2a;
+      box-shadow: none;
+      cursor: not-allowed;
+    }
+
+    .hint {
+      font-size: 12px;
+      color: #3a3a3a;
+      letter-spacing: 0.3px;
+    }
+
+    /* Mute button — shown during call */
+    .mute-row {
+      display: none;
+      align-items: center;
+      gap: 12px;
+    }
+    .mute-row.visible { display: flex; }
+
+    .btn-mute {
+      width: 44px; height: 44px;
+      border-radius: 50%;
+      border: 1px solid var(--border);
+      background: var(--card);
+      color: #888;
+      font-size: 18px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: pointer;
+      touch-action: manipulation;
+      -webkit-tap-highlight-color: transparent;
+      transition: background 0.2s, color 0.2s;
+    }
+    .btn-mute.muted {
+      background: rgba(252,129,129,0.12);
+      border-color: rgba(252,129,129,0.3);
+      color: var(--red);
+    }
+
+    /* Call Mode Selector & Input Styling */
+    .call-mode-wrap {
+      width: 100%;
+      max-width: 400px;
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 12px 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      margin-bottom: 5px;
+    }
+    .mode-toggle {
+      display: flex;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      overflow: hidden;
+    }
+    .mode-btn {
+      flex: 1;
+      padding: 8px;
+      font-size: 12px;
+      background: transparent;
+      border: none;
+      color: #777;
+      cursor: pointer;
+      font-weight: 600;
+      transition: background 0.2s, color 0.2s;
+    }
+    .mode-btn.active {
+      background: rgba(99,179,237,0.15);
+      color: var(--blue);
+    }
+    .phone-input-wrap {
+      display: none;
+      align-items: center;
+      gap: 8px;
+    }
+    .phone-input-wrap.visible {
+      display: flex;
+    }
+    .phone-input {
+      flex: 1;
+      background: rgba(0,0,0,0.25);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 8px 12px;
+      font-size: 13px;
+      color: #fff;
+      outline: none;
+      text-align: center;
+    }
+    .phone-input::placeholder {
+      color: #444;
+    }
+  </style>
+</head>
+<body>
+
+  <!-- Top -->
+  <div class="topbar" style="justify-content: space-between; width: 100%; max-width: 400px; padding: 0 10px;">
+    <div class="brand">ChiefVoice</div>
+    <a href="/calls.html" style="font-size: 11px; text-decoration: none; color: var(--blue); border: 1px solid var(--border); border-radius: 6px; padding: 4px 10px; font-weight: 600; letter-spacing: 0.5px; text-transform: uppercase; transition: all 0.2s;">📞 Call History</a>
+  </div>
+
+  <!-- Middle -->
+  <div class="middle">
+
+    <div class="avatar-wrap" id="avatarWrap">
+      <div class="ring ring-1"></div>
+      <div class="ring ring-2"></div>
+      <div class="ring ring-3"></div>
+      <div class="avatar">🧑‍💼</div>
+    </div>
+
+    <div class="agent-info">
+      <div class="agent-name">Arjun</div>
+      <div class="agent-sub">Customer Support · Tanglish AI</div>
+    </div>
+
+    <div class="status-pill">
+      <div class="dot ready" id="statusDot"></div>
+      <span id="statusText">Ready to call</span>
+    </div>
+
+    <div class="transcript-wrap">
+      <div class="transcript-box" id="transcriptBox">
+        <div class="t-empty" id="tEmpty">Tap call to start<br>talking to Arjun</div>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- Bottom -->
+  <div class="bottom">
+    <div class="safari-notice" id="safariNotice">
+      Tap the call button to allow<br>microphone &amp; audio on Safari
+    </div>
+
+    <!-- Outbound Twilio Call Toggle & Input -->
+    <div class="call-mode-wrap">
+      <div class="mode-toggle">
+        <button class="mode-btn active" id="modeWebBtn" onclick="setCallMode('web')">Web Call</button>
+        <button class="mode-btn" id="modePhoneBtn" onclick="setCallMode('phone')">Phone Call</button>
+      </div>
+      <div class="phone-input-wrap" id="phoneInputWrap">
+        <input type="text" class="phone-input" id="phoneInput" placeholder="Phone Number (e.g. +1234567890)" />
+      </div>
+    </div>
+
+    <div class="mute-row" id="muteRow">
+      <button class="btn-mute" id="muteBtn" onclick="toggleMute()" aria-label="Mute">🎙️</button>
+      <div style="font-size:11px;color:#444">Mute</div>
+    </div>
+
+    <button class="btn-call" id="callBtn" onclick="toggleCall()" aria-label="Start call">📞</button>
+    <div class="hint" id="hintText">Tap to start call</div>
+  </div>
+
+<script>
+// ══════════════════════════════════════════════════════════════
+// ChiefVoice — Mobile-optimised browser client
+//
+// Mobile quirks handled:
+//   1. iOS Safari requires AudioContext to be created/resumed
+//      INSIDE a user-gesture handler (the tap on the call button).
+//      We defer all AudioContext creation until inside toggleCall().
+//
+//   2. Safari doesn't support AudioContext({ sampleRate: 16000 }) on
+//      older iOS. We capture at device default, then resample manually
+//      via a resampling buffer before sending to Gemini.
+//
+//   3. ScriptProcessor is deprecated but has near-universal mobile
+//      support. AudioWorklet needs HTTPS + module scripts — works on
+//      Railway (HTTPS), so we use it when available, fall back to
+//      ScriptProcessor.
+//
+//   4. Creating a new AudioContext per audio chunk (old playback code)
+//      causes audio gaps on mobile. We use ONE persistent playback
+//      AudioContext and schedule buffers with timestamps instead.
+//
+//   5. WebSocket URL: auto-detects wss:// vs ws:// from page protocol.
+//      On Railway (HTTPS) this will correctly use wss://.
+// ══════════════════════════════════════════════════════════════
+
+// ── State ─────────────────────────────────────────────────────
+let ws             = null;
+let captureCtx     = null;   // AudioContext for mic capture
+let playCtx        = null;   // Persistent AudioContext for playback
+let mediaStream    = null;
+let processorNode  = null;
+let sourceNode     = null;
+let isCallActive   = false;
+let isMuted        = false;
+let nextPlayAt     = 0;      // Scheduled playback time (seconds)
+
+// ── DOM refs ──────────────────────────────────────────────────
+const statusDot     = document.getElementById("statusDot");
+const statusText    = document.getElementById("statusText");
+const callBtn       = document.getElementById("callBtn");
+const avatarWrap    = document.getElementById("avatarWrap");
+const hintText      = document.getElementById("hintText");
+const transcriptBox = document.getElementById("transcriptBox");
+const tEmpty        = document.getElementById("tEmpty");
+const muteRow       = document.getElementById("muteRow");
+const muteBtn       = document.getElementById("muteBtn");
+const safariNotice  = document.getElementById("safariNotice");
+
+// ── Detect Safari (needs special AudioContext handling) ────────
+const isSafari = /^((?!chrome|android).)*safari/i.test(navigator.userAgent);
+if (isSafari) safariNotice.style.display = "block";
+
+// ── Dynamic Agent State ───────────────────────────────────────
+let currentAgentName = "Arjun";
+let currentAgentAvatar = "👨🏽‍💼";
+
+async function loadAgentConfig() {
+  try {
+    const response = await fetch("/api/config");
+    const config = await response.json();
+    currentAgentName = config.activeVoice || "Arjun";
+    
+    const AVATARS = {
+      Arjun: "👨🏽‍💼",
+      Priya: "👩🏽‍💼",
+      Dev: "👨🏻‍💻",
+      Kavya: "👩🏻‍💼"
+    };
+    currentAgentAvatar = AVATARS[currentAgentName] || "🧑‍💼";
+    
+    // Update UI elements
+    const nameEl = document.querySelector(".agent-name");
+    const avatarEl = document.querySelector(".avatar");
+    if (nameEl) nameEl.textContent = currentAgentName;
+    if (avatarEl) avatarEl.textContent = currentAgentAvatar;
+    if (tEmpty && tEmpty.style.display !== "none") {
+      tEmpty.innerHTML = `Tap call to start<br>talking to ${currentAgentName}`;
+    }
+  } catch (err) {
+    console.error("Failed to load agent configuration:", err);
+  }
+}
+
+// Load config immediately on page script run
+loadAgentConfig();
+
+// ── Helpers ───────────────────────────────────────────────────
+function setStatus(cls, text) {
+  statusDot.className = "dot " + cls;
+  statusText.textContent = text;
+}
+
+function setSpeaking(on) {
+  if (on) {
+    avatarWrap.classList.add("speaking");
+    setStatus("speaking", currentAgentName + " is speaking…");
+  } else {
+    avatarWrap.classList.remove("speaking");
+    if (isCallActive) setStatus("active", "Listening…");
+  }
+}
+
+function addLine(role, text) {
+  if (tEmpty) tEmpty.style.display = "none";
+  const div = document.createElement("div");
+  div.className = "t-line " + role;
+  div.innerHTML = `<span class="t-who">${role === "user" ? "You" : currentAgentName}</span>
+                   <span class="t-text">${text.replace(/</g,"&lt;")}</span>`;
+  transcriptBox.appendChild(div);
+  transcriptBox.scrollTop = transcriptBox.scrollHeight;
+}
+
+// ── Call mode switching ───────────────────────────────────────
+let callMode = "web"; // "web" or "phone"
+let currentCallSid = null;
+
+function setCallMode(mode) {
+  if (isCallActive) return;
+  callMode = mode;
+  document.getElementById("modeWebBtn").classList.toggle("active", mode === "web");
+  document.getElementById("modePhoneBtn").classList.toggle("active", mode === "phone");
+
+  const phoneInputWrap = document.getElementById("phoneInputWrap");
+  if (mode === "phone") {
+    phoneInputWrap.classList.add("visible");
+    hintText.textContent = "Tap to call your phone";
+    setStatus("ready", "Ready to trigger phone call");
+  } else {
+    phoneInputWrap.classList.remove("visible");
+    hintText.textContent = "Tap to start call";
+    setStatus("ready", "Ready to call");
+  }
+}
+
+// ── Outbound Twilio Call Triggers ─────────────────────────────
+async function startPhoneCall() {
+  const phone = document.getElementById("phoneInput").value.trim();
+  if (!phone) {
+    alert("Please enter your phone number first!");
+    return;
+  }
+
+  callBtn.disabled = true;
+  setStatus("active", "Initiating phone call...");
+
+  try {
+    const response = await fetch("/api/vobiz/call", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ phoneNumber: phone })
+    });
+    const result = await response.json();
+
+    if (!response.ok || !result.success) {
+      throw new Error(result.error || "Call failed to initiate");
+    }
+
+    currentCallSid = result.callSid;
+    isCallActive = true;
+    callBtn.disabled = false;
+    callBtn.classList.add("active");
+    callBtn.textContent = "📵";
+    hintText.textContent = "Tap to end phone call";
+    setStatus("active", "Calling " + phone + "...");
+  } catch (err) {
+    console.error("Phone call error:", err);
+    setStatus("error", err.message.slice(0, 48));
+    callBtn.disabled = false;
+  }
+}
+
+async function endPhoneCall() {
+  callBtn.disabled = true;
+  setStatus("active", "Ending phone call...");
+
+  if (currentCallSid) {
+    try {
+      await fetch("/api/vobiz/hangup", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ callSid: currentCallSid })
+      });
+    } catch (e) {
+      console.error("Failed to hang up Vobiz call:", e);
+    }
+  }
+
+  isCallActive = false;
+  currentCallSid = null;
+  callBtn.classList.remove("active");
+  callBtn.textContent = "📞";
+  callBtn.disabled = false;
+  hintText.textContent = "Tap to call your phone";
+  setStatus("ready", "Ready to trigger phone call");
+}
+
+// ── Toggle call ───────────────────────────────────────────────
+async function toggleCall() {
+  if (callMode === "phone") {
+    if (!isCallActive) await startPhoneCall();
+    else await endPhoneCall();
+  } else {
+    if (!isCallActive) await startCall();
+    else endCall();
+  }
+}
+
+async function startCall() {
+  callBtn.disabled = true;
+  setStatus("active", "Connecting…");
+  safariNotice.style.display = "none";
+  
+  // Reload the agent config right before starting the call
+  await loadAgentConfig();
+
+  // ── 1. Mic permission ──────────────────────────────────────
+  // Must be called from inside user gesture (this function IS the handler)
+  try {
+    mediaStream = await navigator.mediaDevices.getUserMedia({
+      audio: {
+        echoCancellation: true,
+        noiseSuppression: true,
+        sampleRate: 16000,         // hint — browser may ignore on Safari
+        channelCount: 1,
+      },
+      video: false,
+    });
+  } catch (err) {
+    console.error("Mic error:", err);
+    setStatus("error", err.name === "NotAllowedError" ? "Mic denied" : "No mic found");
+    callBtn.disabled = false;
+    if (isSafari) safariNotice.style.display = "block";
+    return;
+  }
+
+  // ── 2. Create AudioContexts INSIDE user gesture ────────────
+  // Safari REQUIRES AudioContext to be created (or resumed) in a user
+  // gesture. Creating here (inside the click handler) satisfies that.
+  try {
+    // Capture context — try 16kHz, fall back to default
+    try {
+      captureCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
+    } catch {
+      captureCtx = new (window.AudioContext || window.webkitAudioContext)();
+    }
+
+    // Playback context at 24kHz (Gemini output sample rate)
+    try {
+      playCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 24000 });
+    } catch {
+      playCtx = new (window.AudioContext || window.webkitAudioContext)();
+    }
+
+    // iOS Safari may start suspended — resume must be called in gesture
+    if (captureCtx.state === "suspended") await captureCtx.resume();
+    if (playCtx.state === "suspended")    await playCtx.resume();
+
+  } catch (err) {
+    console.error("AudioContext error:", err);
+    setStatus("error", "Audio init failed");
+    callBtn.disabled = false;
+    return;
+  }
+
+  nextPlayAt = 0; // reset playback clock
+
+  // ── 3. WebSocket to server ─────────────────────────────────
+  const proto = location.protocol === "https:" ? "wss:" : "ws:";
+  const wsUrl = `${proto}//${location.host}/session`;
+  ws = new WebSocket(wsUrl);
+  ws.binaryType = "arraybuffer";
+
+  ws.onopen = () => setStatus("active", "Waiting for AI…");
+
+  ws.onmessage = (event) => {
+    let msg;
+    try { msg = JSON.parse(event.data); } catch { return; }
+
+    switch (msg.type) {
+      case "ready":
+        isCallActive = true;
+        callBtn.disabled = false;
+        callBtn.classList.add("active");
+        callBtn.textContent = "📵";
+        hintText.textContent = "Tap to end call";
+        muteRow.classList.add("visible");
+        setStatus("active", "Listening…");
+        startMicCapture();
+        break;
+
+      case "audio":
+        setSpeaking(true);
+        scheduleAudio(msg.data, msg.mimeType);
+        break;
+
+      case "transcript":
+        addLine(msg.role, msg.text);
+        break;
+
+      case "interrupted":
+        // User barged in — stop scheduled audio
+        nextPlayAt = 0;
+        setSpeaking(false);
+        break;
+
+      case "turn_complete":
+        // AI done — speaking state clears after scheduled audio drains
+        // We rely on the last scheduled buffer's onended to call setSpeaking(false)
+        break;
+
+      case "ended":
+        endCall(true);
+        break;
+
+      case "error":
+        setStatus("error", (msg.message || "Error").slice(0, 48));
+        endCall(true);
+        break;
+    }
+  };
+
+  ws.onclose = () => { if (isCallActive) endCall(true); };
+  ws.onerror = () => { setStatus("error", "Connection lost"); endCall(true); };
+}
+
+function endCall(fromServer = false) {
+  isCallActive = false;
+  setSpeaking(false);
+  nextPlayAt = 0;
+  muteRow.classList.remove("visible");
+  isMuted = false;
+  muteBtn.classList.remove("muted");
+  muteBtn.textContent = "🎙️";
+
+  if (!fromServer && ws && ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({ type: "stop" }));
+    ws.close();
+  }
+  ws = null;
+
+  stopMicCapture();
+
+  callBtn.classList.remove("active");
+  callBtn.textContent = "📞";
+  callBtn.disabled = false;
+  hintText.textContent = "Tap to start call";
+  setStatus("ready", "Ready to call");
+}
+
+// ── Mute ──────────────────────────────────────────────────────
+function toggleMute() {
+  isMuted = !isMuted;
+  muteBtn.classList.toggle("muted", isMuted);
+  muteBtn.textContent = isMuted ? "🔇" : "🎙️";
+  if (mediaStream) {
+    mediaStream.getAudioTracks().forEach(t => t.enabled = !isMuted);
+  }
+}
+
+// ── Mic capture ───────────────────────────────────────────────
+async function startMicCapture() {
+  const nativeSR = captureCtx.sampleRate;
+  sourceNode = captureCtx.createMediaStreamSource(mediaStream);
+
+  // Buffer size 2048 = ~128ms at 16kHz, good latency/stability balance on mobile
+  processorNode = captureCtx.createScriptProcessor(2048, 1, 1);
+
+  processorNode.onaudioprocess = (e) => {
+    if (!isCallActive || !ws || ws.readyState !== WebSocket.OPEN || isMuted) return;
+
+    let samples = e.inputBuffer.getChannelData(0); // Float32 at nativeSR
+
+    // Resample to 16kHz if needed (Safari may capture at 44100 or 48000)
+    if (nativeSR !== 16000) {
+      samples = resampleFloat32(samples, nativeSR, 16000);
+    }
+
+    const pcm16 = float32ToInt16(samples);
+    ws.send(JSON.stringify({ type: "audio", data: arrayBufferToBase64(pcm16.buffer) }));
+  };
+
+  sourceNode.connect(processorNode);
+  processorNode.connect(captureCtx.destination);
+}
+
+function stopMicCapture() {
+  try { processorNode?.disconnect(); } catch {}
+  try { sourceNode?.disconnect(); }    catch {}
+  try { captureCtx?.close(); }         catch {}
+  try { mediaStream?.getTracks().forEach(t => t.stop()); } catch {}
+  if (playCtx && playCtx.state !== "closed") {
+    try { playCtx.close(); } catch {}
+  }
+  processorNode = null;
+  sourceNode    = null;
+  captureCtx    = null;
+  playCtx       = null;
+  mediaStream   = null;
+}
+
+// ── Resampler (linear interpolation) ─────────────────────────
+// Handles Safari capturing at 44100/48000 when we asked for 16000
+function resampleFloat32(input, fromRate, toRate) {
+  if (fromRate === toRate) return input;
+  const ratio  = fromRate / toRate;
+  const outLen = Math.round(input.length / ratio);
+  const out    = new Float32Array(outLen);
+  for (let i = 0; i < outLen; i++) {
+    const pos  = i * ratio;
+    const idx  = Math.floor(pos);
+    const frac = pos - idx;
+    const a    = input[idx]     ?? 0;
+    const b    = input[idx + 1] ?? a;
+    out[i]     = a + frac * (b - a);
+  }
+  return out;
+}
+
+// ── PCM helpers ───────────────────────────────────────────────
+function float32ToInt16(f32) {
+  const out = new Int16Array(f32.length);
+  for (let i = 0; i < f32.length; i++) {
+    const s = Math.max(-1, Math.min(1, f32[i]));
+    out[i]  = s < 0 ? s * 0x8000 : s * 0x7FFF;
+  }
+  return out;
+}
+
+function arrayBufferToBase64(buf) {
+  const bytes = new Uint8Array(buf);
+  let b = "";
+  for (let i = 0; i < bytes.length; i++) b += String.fromCharCode(bytes[i]);
+  return btoa(b);
+}
+
+function base64ToArrayBuffer(b64) {
+  const bin   = atob(b64);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return bytes.buffer;
+}
+
+// ── Audio playback (scheduled, gap-free) ─────────────────────
+// Instead of creating a new AudioContext per chunk (causes gaps on mobile),
+// we use ONE persistent playCtx and schedule buffers back-to-back using
+// AudioContext.currentTime as a timeline.
+function scheduleAudio(base64Data, mimeType) {
+  if (!playCtx || playCtx.state === "closed") return;
+
+  const sampleRate = parseSampleRate(mimeType) || 24000;
+  const raw        = base64ToArrayBuffer(base64Data);
+  const int16      = new Int16Array(raw);
+  const float32    = new Float32Array(int16.length);
+
+  for (let i = 0; i < int16.length; i++) {
+    float32[i] = int16[i] / (int16[i] < 0 ? 0x8000 : 0x7FFF);
+  }
+
+  // Create the AudioBuffer at the native incoming sample rate (usually 24000Hz).
+  // The browser's audio engine will natively and smoothly resample this buffer
+  // to the device's hardware sample rate, avoiding any robotic/metallic artifacts.
+  const buffer = playCtx.createBuffer(1, float32.length, sampleRate);
+  buffer.copyToChannel(float32, 0);
+
+  const src = playCtx.createBufferSource();
+  src.buffer = buffer;
+  src.connect(playCtx.destination);
+
+  // Schedule: either start now (if nothing playing) or right after last chunk
+  const now      = playCtx.currentTime;
+  const startAt  = Math.max(now + 0.01, nextPlayAt);
+  nextPlayAt     = startAt + buffer.duration;
+
+  src.start(startAt);
+
+  src.onended = () => {
+    // If no more chunks scheduled soon, mark speaking done
+    if (playCtx && nextPlayAt <= playCtx.currentTime + 0.1) {
+      setSpeaking(false);
+    }
+  };
+}
+
+function parseSampleRate(mimeType) {
+  const m = (mimeType || "").match(/rate=(\d+)/);
+  return m ? parseInt(m[1]) : 24000;
+}
+</script>
+</body>
+</html>

@@ -1,0 +1,433 @@
+// src/crm/autoDialEngine.js
+// ============================================================
+// Server-side "Continuous Dialer Mode" — walks a dialer task's lead list
+// and places one outbound call at a time, entirely on the backend. This
+// used to live only in the frontend (DialerSimulator.tsx): a React effect
+// watched each call finish, waited 3s, then dialed the next lead. That
+// meant closing the browser tab — or the laptop going to sleep, or the
+// user just navigating away — silently stopped the campaign mid-list with
+// no error, no notification, and no way to resume other than reopening
+// the exact page and turning it back on.
+//
+// This engine polls dialer_tasks the same way services/dialerRetryEngine.js
+// polls call_logs for due retries: state lives entirely in MySQL, the
+// interval just re-reads it, so a server restart loses at most one poll
+// tick's worth of progress, never the campaign itself. The frontend now
+// only ever calls POST /api/dialer-tasks/:id/auto-dial/start|stop (see
+// src/routes/campaigns.js) to flip auto_dial_enabled — it no longer
+// drives the loop itself.
+// ============================================================
+
+const db = require("../db/repository");
+const { getQueue } = require("../queue");
+const { getLogger } = require("../observability/logger");
+const log = getLogger("crm.autoDialEngine");
+
+const INTER_CALL_DELAY_MS = 3 * 1000; // matches the frontend's prior pacing between one call ending and the next starting
+const STUCK_CALL_MAX_AGE_MS = 30 * 60 * 1000; // same bound as the 30-min Map TTLs triggerVobizOutboundCall itself uses
+// Actually PLACING a call — the outbound HTTP request to Vobiz that
+// starts ringing the lead's phone — now runs through the same job-queue
+// infrastructure the post-call pipeline already uses (see
+// vobizProxy.js's postCallQueue), instead of
+// happening inline inside a poll tick. Bounded concurrency means several
+// tasks/orgs can have calls placed in parallel instead of every dial
+// across the whole platform being serialized behind one 15s poll loop;
+// each job still makes exactly one placement attempt and never rethrows
+// (see handlePlaceDialJob below) — business-level retry for a failed
+// placement stays with dialerRetryEngine.js's own later redial, same as
+// before this change.
+const DIAL_CONCURRENCY = 5;
+
+function getPublicBaseUrl() {
+  // A background job has no incoming HTTP request to build a callback URL
+  // from the way /api/vobiz/call does (req.headers.host) — PUBLIC_URL was
+  // the only thing that ever worked for services/dialerRetryEngine.js's
+  // identical need, but it's an env var most deployments never had a
+  // reason to set (confirmed in production: this engine paused every task
+  // immediately with "No PUBLIC_URL configured" on a VM that had never
+  // needed it before). DOMAIN, by contrast, is required for Caddy's own
+  // automatic-HTTPS setup (see Caddyfile/Caddyfile.uat's `{$DOMAIN}`) —
+  // any deployment serving HTTPS at all already has it set, so fall back
+  // to it before giving up.
+  if (process.env.PUBLIC_URL) return process.env.PUBLIC_URL;
+  if (process.env.DOMAIN) return `https://${process.env.DOMAIN}`;
+  return null;
+}
+
+// Maps a finished call_logs row's status onto the status enum the
+// frontend's DialTaskCallResult type already expects (ReportsView.tsx /
+// PrintableReport.tsx) — 'Pending' | 'Calling' | 'Completed' | 'No Answer' | 'Skipped'.
+// Anything that isn't a clean "Completed" or "No Answer" (a hard API
+// error, missing credentials, etc) is folded into "No Answer" rather than
+// a status the frontend type doesn't know about, so old UI code doesn't
+// have to change to render it.
+function mapCallStatusToResultStatus(status) {
+  if (status === "Completed") return "Completed";
+  if (status === "No Answer") return "No Answer";
+  // "Callback Scheduled" (caller said they're busy, asked to be called
+  // back — see callFinalizer.js/postCallAgents.js:extractFollowUp) must
+  // pass through as its own status, not collapse into "No Answer": a
+  // lead the AI actually reached and is deliberately holding for a
+  // scheduled retry (dialerRetryEngine.js) is a different situation from
+  // one nobody picked up for.
+  if (status === "Callback Scheduled") return "Callback Scheduled";
+  return "No Answer";
+}
+
+// Matches a raw outbound number string to its provider — used only as a
+// fallback (see resolveProviderAndAgent below) for a task that was
+// started without ever picking an agent with its own assigned number.
+async function resolveProviderFromNumberString(orgId, outboundNumber) {
+  if (!outboundNumber) return { provider: "vobiz", from: undefined };
+  let numbers = [];
+  try {
+    numbers = await db.list("numbers", orgId);
+  } catch (err) {
+    log.error(`❌ [autoDialEngine] Failed to look up numbers for org ${orgId}:`, err.message);
+    return { provider: "vobiz", from: outboundNumber };
+  }
+  const match = numbers.find((n) => n.number === outboundNumber);
+  const providerName = (match?.provider || "").toLowerCase();
+  if (providerName.includes("vobiz")) return { provider: "vobiz", from: outboundNumber };
+  return { provider: providerName || "unknown", from: outboundNumber };
+}
+
+// Resolves provider + from-number + agentId for a task's next dial.
+//
+// The dialer-task wizard's "agent" picker (DialerSimulator.tsx's
+// wizardAgentId) is stored on the task under `assignedTeamMemberId` — a
+// pre-existing naming quirk in this codebase, not something this engine
+// introduced: the frontend's OWN manual-dial code already does the exact
+// same thing (`agentId: selectedTask?.assignedTeamMemberId`) when placing
+// a call itself. Kept identical here so a task behaves the same whether
+// a human clicks "Dial" or the background engine does.
+//
+// Each AI agent (org_agents table) carries its own outboundNumberId — a
+// specific virtual_numbers row assigned via Settings > Agents — which is
+// the actual source of truth for which number/provider a wizard-selected
+// agent should dial through. Resolving through the agent (rather than
+// only the task-level outboundNumber string set at auto-dial-start time)
+// means: (a) the right AI voice/persona actually gets used — passing
+// agentId through to triggerVobizOutboundCall
+// is what makes that call show up in logs as "using wizard-selected
+// agent", not silently fall back to a generic default persona; (b) the
+// right provider gets picked without depending on the frontend having
+// had some particular number selected in an unrelated part of the UI at
+// the exact moment "Run in Background" was clicked.
+async function resolveProviderAndAgent(orgId, task) {
+  const agentId = task.assignedTeamMemberId || null;
+  if (agentId) {
+    try {
+      const agent = await db.getAgent(agentId, orgId);
+      if (agent && agent.outboundNumberId) {
+        const numbers = await db.list("numbers", orgId);
+        const numRow = numbers.find((n) => n.id === agent.outboundNumberId);
+        if (numRow) {
+          const providerName = (numRow.provider || "").toLowerCase();
+          const provider = providerName.includes("vobiz") ? "vobiz" : (providerName || "unknown");
+          return { provider, from: numRow.number, agentId };
+        }
+      }
+    } catch (err) {
+      log.error(`❌ [autoDialEngine] Failed to resolve agent ${agentId} for org ${orgId}:`, err.message);
+    }
+  }
+  // No agent, or the agent has no outbound number assigned yet — fall
+  // back to the raw number string captured when auto-dial was started.
+  const fallback = await resolveProviderFromNumberString(orgId, task.outboundNumber);
+  return { ...fallback, agentId };
+}
+
+function nextPendingLeadId(task) {
+  const results = task.callResults || {};
+  return (task.leadIds || []).find((leadId) => {
+    const r = results[leadId];
+    return !r || r.status === "Pending";
+  }) || null;
+}
+
+// One task, one tick. Never throws — every branch either advances the
+// task's own state or leaves it untouched for the next tick to retry.
+async function processTask(task) {
+  const { orgId, id: taskId } = task;
+
+  // ── A call is already in flight for this task — check if it finished ──
+  if (task.currentProviderCallSid) {
+    let finishedLog = null;
+    try {
+      finishedLog = await db.findCallLogByProviderCallSid(orgId, task.currentProviderCallSid);
+    } catch (err) {
+      log.error(`❌ [autoDialEngine] Lookup failed for task ${taskId} (org ${orgId}):`, err.message);
+      return;
+    }
+
+    if (finishedLog) {
+      const leadId = task.currentLeadId;
+      const callResults = { ...(task.callResults || {}) };
+      if (leadId) {
+        callResults[leadId] = {
+          status: mapCallStatusToResultStatus(finishedLog.status),
+          duration: finishedLog.duration || 0,
+          sentiment: finishedLog.sentiment || "Unknown",
+          intent: "Unknown",
+          summary: finishedLog.summary || "",
+          recordingUrl: finishedLog.recordingUrl || undefined,
+          callId: finishedLog.id,
+          callbackTime: finishedLog.callbackTime || undefined,
+        };
+      }
+      await db.patch("dialertasks", orgId, taskId, {
+        callResults,
+        currentLeadId: null,
+        currentProviderCallSid: null,
+        currentCallStartedAt: null,
+        autoDialStatus: task.autoDialEnabled ? "waiting" : "paused",
+        nextDialAt: new Date(Date.now() + INTER_CALL_DELAY_MS).toISOString(),
+      });
+      if (global.broadcastLog) {
+        global.broadcastLog(`🤖 Auto-dial: finished call to lead ${leadId || "(unknown)"} for task "${task.name}" — ${finishedLog.status}`, {
+          type: "auto_dial_progress", orgId, taskId, leadId, status: "call_finished", callStatus: finishedLog.status,
+        });
+      }
+      return;
+    }
+
+    // Still ringing/connected — unless it's been in flight implausibly
+    // long, in which case the call_logs row it was waiting for likely
+    // never got written (a crashed webhook, a WS that never registered a
+    // finalizer AND never hit the routes/vobiz.js fallback either). Don't
+    // leave the task stuck forever waiting on a call that will never
+    // resolve.
+    const startedAt = task.currentCallStartedAt ? new Date(task.currentCallStartedAt).getTime() : 0;
+    if (startedAt && Date.now() - startedAt > STUCK_CALL_MAX_AGE_MS) {
+      log.warn(`⚠️ [autoDialEngine] Task ${taskId} (org ${orgId}) — call to ${task.currentProviderCallSid} never resolved after ${STUCK_CALL_MAX_AGE_MS / 60000}min, treating as failed.`);
+      const leadId = task.currentLeadId;
+      const callResults = { ...(task.callResults || {}) };
+      if (leadId) callResults[leadId] = { status: "No Answer", duration: 0, sentiment: "Unknown", intent: "Unknown", summary: "" };
+      await db.patch("dialertasks", orgId, taskId, {
+        callResults, currentLeadId: null, currentProviderCallSid: null, currentCallStartedAt: null,
+        autoDialStatus: task.autoDialEnabled ? "waiting" : "paused",
+        nextDialAt: new Date(Date.now() + INTER_CALL_DELAY_MS).toISOString(),
+      });
+    }
+    return;
+  }
+
+  // ── A lead has been claimed and its placement job queued, but the queue
+  // hasn't actually placed the call yet (no providerCallSid back from the
+  // job handler so far) — wait for it rather than claiming the same lead
+  // again next tick. Unstuck by the same staleness bound as an in-flight
+  // call above, in case the queue job died without ever calling back. ──
+  if (task.currentLeadId) {
+    const claimedAt = task.currentCallStartedAt ? new Date(task.currentCallStartedAt).getTime() : 0;
+    if (claimedAt && Date.now() - claimedAt > STUCK_CALL_MAX_AGE_MS) {
+      log.warn(`⚠️ [autoDialEngine] Task ${taskId} (org ${orgId}) — dial job for lead ${task.currentLeadId} never placed a call after ${STUCK_CALL_MAX_AGE_MS / 60000}min, treating as failed.`);
+      const callResults = { ...(task.callResults || {}), [task.currentLeadId]: { status: "No Answer", duration: 0, sentiment: "Unknown", intent: "Unknown", summary: "Dial job never placed the call." } };
+      await db.patch("dialertasks", orgId, taskId, {
+        callResults, currentLeadId: null, currentCallStartedAt: null,
+        autoDialStatus: task.autoDialEnabled ? "waiting" : "paused",
+        nextDialAt: new Date(Date.now() + INTER_CALL_DELAY_MS).toISOString(),
+      });
+    }
+    return;
+  }
+
+  // ── No call in flight — this task was only kept in scope by a call that
+  // just finished above; nothing left to do this tick if auto-dial isn't
+  // (or is no longer) enabled ──
+  if (!task.autoDialEnabled) return;
+
+  if (task.nextDialAt && new Date(task.nextDialAt).getTime() > Date.now()) return; // still in the inter-call pause
+
+  const pendingLeadId = nextPendingLeadId(task);
+  if (!pendingLeadId) {
+    await db.patch("dialertasks", orgId, taskId, { autoDialEnabled: false, autoDialStatus: "completed" });
+    if (global.broadcastLog) {
+      global.broadcastLog(`🤖 Auto-dial task "${task.name}" completed — every lead has been dialed.`, {
+        type: "auto_dial_progress", orgId, taskId, status: "task_completed",
+      });
+    }
+    return;
+  }
+
+  // Atomically claim the lead in MySQL. The old read-then-patch sequence
+  // allowed two scheduler instances to claim the same lead during a rolling
+  // deploy. Only the instance that receives the returned row may enqueue it.
+  const claimedTask = await db.claimAutoDialLead(orgId, taskId, pendingLeadId);
+  if (!claimedTask) return;
+
+  try {
+    const lead = await db.getLeadById(orgId, pendingLeadId);
+    if (!lead || !lead.phone) {
+      const callResults = { ...(task.callResults || {}), [pendingLeadId]: { status: "No Answer", duration: 0, sentiment: "Unknown", intent: "Unknown", summary: "Lead not found or missing a phone number." } };
+      await db.patch("dialertasks", orgId, taskId, {
+        callResults, currentLeadId: null, currentCallStartedAt: null,
+        autoDialStatus: "waiting", nextDialAt: new Date(Date.now() + INTER_CALL_DELAY_MS).toISOString(),
+      });
+      return;
+    }
+
+    const baseUrl = getPublicBaseUrl();
+    if (!baseUrl) {
+      log.error(`❌ [autoDialEngine] No PUBLIC_URL configured — pausing task ${taskId} (org ${orgId}); cannot build outbound-call callback URLs.`);
+      await db.patch("dialertasks", orgId, taskId, {
+        currentLeadId: null, currentCallStartedAt: null,
+        autoDialEnabled: false, autoDialStatus: "paused",
+      });
+      return;
+    }
+
+    const { provider, from, agentId } = await resolveProviderAndAgent(orgId, task);
+
+    if (provider !== "vobiz") {
+      log.error(`❌ [autoDialEngine] Task ${taskId} (org ${orgId}) — outbound number's provider ("${provider}") has no server-side dial support yet; pausing.`);
+      await db.patch("dialertasks", orgId, taskId, {
+        currentLeadId: null, currentCallStartedAt: null,
+        autoDialEnabled: false, autoDialStatus: "paused",
+      });
+      if (global.broadcastLog) {
+        global.broadcastLog(`🤖 Auto-dial task "${task.name}" paused — its outbound number's provider isn't supported for background dialing yet.`, {
+          type: "auto_dial_progress", orgId, taskId, status: "paused",
+        });
+      }
+      return;
+    }
+
+    // The lead is claimed and everything needed to place the call has
+    // been resolved — hand the actual placement (the outbound HTTP
+    // request to the telephony provider) to the queue instead of doing it
+    // inline here, so a slow/rate-limited provider response doesn't hold
+    // up this poll tick from moving on to other tasks. queue.enqueue()
+    // returns as soon as the job is accepted, not once it's placed.
+    getDialQueue().enqueue("placeDial", {
+      orgId, taskId, leadId: pendingLeadId, leadName: lead.name || null, leadPhone: lead.phone,
+      taskName: task.name, provider, baseUrl, questions: task.questions, language: task.language,
+      from, agentId, starhealthEnabled: !!task.starhealthEnabled,
+    });
+  } catch (err) {
+    log.error(`❌ [autoDialEngine] Failed to prepare dial for lead ${pendingLeadId} on task ${taskId} (org ${orgId}):`, err.message);
+    const callResults = { ...(task.callResults || {}), [pendingLeadId]: { status: "No Answer", duration: 0, sentiment: "Unknown", intent: "Unknown", summary: err.message } };
+    await db.patch("dialertasks", orgId, taskId, {
+      callResults, currentLeadId: null, currentCallStartedAt: null,
+      autoDialStatus: "waiting", nextDialAt: new Date(Date.now() + INTER_CALL_DELAY_MS).toISOString(),
+    }).catch(() => {});
+  }
+}
+
+// Queue job: places exactly one outbound call. Deliberately never
+// rethrows — a failed placement is a normal, expected outcome (busy
+// signal, provider hiccup, compliance block), not a queue-level error to
+// retry-with-backoff; dialerRetryEngine.js already owns business-level
+// retry for a lead that didn't get through. Rethrowing here would also
+// leave the task's currentLeadId claimed until the queue exhausts its own
+// retries, stalling the whole task for no benefit.
+async function handlePlaceDialJob(data) {
+  const { orgId, taskId, leadId, leadName, leadPhone, taskName, provider, baseUrl, questions, language, from, agentId, starhealthEnabled } = data;
+  try {
+    // The job sat in the queue briefly between being enqueued and actually
+    // running — re-check the task wasn't stopped in that window (POST
+    // .../auto-dial/stop flips autoDialEnabled immediately). Without this,
+    // a Stop click landing in that gap would still place one more call
+    // with no way to hang it up (forceHangupCurrentCall only knows about
+    // calls that already have a providerCallSid).
+    const tasksBeforeDial = await db.list("dialertasks", orgId);
+    const taskBeforeDial = tasksBeforeDial.find((t) => t.id === taskId);
+    if (!taskBeforeDial || !taskBeforeDial.autoDialEnabled) {
+      log.info(`🤖 [autoDialEngine] Skipping queued dial for lead ${leadId} on task ${taskId} (org ${orgId}) — task was stopped before the job ran.`);
+      await db.patch("dialertasks", orgId, taskId, { currentLeadId: null, currentCallStartedAt: null }).catch(() => {});
+      return;
+    }
+
+    const { triggerVobizOutboundCall } = require("../telephony/vobizProxy");
+    const result = await triggerVobizOutboundCall(orgId, leadPhone, {
+      baseUrl, questions, language, from, agentId, starhealthEnabled, taskId, leadId,
+    });
+
+    await db.patch("dialertasks", orgId, taskId, { currentProviderCallSid: result.callSid, currentProvider: provider });
+    if (global.broadcastLog) {
+      global.broadcastLog(`🤖 Auto-dial: calling ${leadName || leadPhone} for task "${taskName}"`, {
+        type: "auto_dial_progress", orgId, taskId, leadId, status: "dialing",
+      });
+    }
+  } catch (err) {
+    log.error(`❌ [autoDialEngine] Failed to dial lead ${leadId} for task ${taskId} (org ${orgId}):`, err.message);
+
+    if (err.statusCode === 403) {
+      // A compliance block (quiet hours, DND, missing consent, etc) applies
+      // org-wide, not just to this one lead — pause the whole task instead
+      // of burning through every remaining lead marking each one failed
+      // for the identical reason within the next few poll ticks.
+      await db.patch("dialertasks", orgId, taskId, {
+        currentLeadId: null, currentCallStartedAt: null,
+        autoDialEnabled: false, autoDialStatus: "paused",
+      }).catch(() => {});
+      if (global.broadcastLog) {
+        global.broadcastLog(`🤖 Auto-dial task "${taskName}" paused — ${err.message}`, {
+          type: "auto_dial_progress", orgId, taskId, status: "paused",
+        });
+      }
+      return;
+    }
+
+    try {
+      const tasks = await db.list("dialertasks", orgId);
+      const currentTask = tasks.find((t) => t.id === taskId);
+      const callResults = { ...((currentTask && currentTask.callResults) || {}), [leadId]: { status: "No Answer", duration: 0, sentiment: "Unknown", intent: "Unknown", summary: err.message } };
+      await db.patch("dialertasks", orgId, taskId, {
+        callResults, currentLeadId: null, currentCallStartedAt: null,
+        autoDialStatus: "waiting", nextDialAt: new Date(Date.now() + INTER_CALL_DELAY_MS).toISOString(),
+      });
+    } catch (patchErr) {
+      log.error(`❌ [autoDialEngine] Failed to record dial failure for lead ${leadId} on task ${taskId} (org ${orgId}):`, patchErr.message);
+    }
+  }
+  // Never rethrow — see comment above.
+}
+
+let dialQueueRegistered = false;
+function getDialQueue() {
+  return getQueue();
+}
+
+async function processAutoDialTasks() {
+  let tasks = [];
+  try {
+    tasks = await db.getActiveAutoDialTasks();
+  } catch (err) {
+    log.error("❌ [autoDialEngine] Failed to fetch active auto-dial tasks:", err.message);
+    return;
+  }
+  for (const task of tasks) {
+    try {
+      await processTask(task);
+    } catch (err) {
+      log.error(`❌ [autoDialEngine] Unexpected error processing task ${task.id} (org ${task.orgId}):`, err.message);
+    }
+  }
+}
+
+// Immediately hangs up whatever call a task currently has in flight —
+// called synchronously from POST /dialer-tasks/:id/auto-dial/stop (see
+// src/routes/campaigns.js) so "Stop" actually terminates the live call
+// right away instead of just stopping the NEXT one from being dialed and
+// leaving the current one running until it ends on its own. Safe to call
+// on a task with no in-flight call (no-op).
+async function forceHangupCurrentCall(task) {
+  if (!task.currentProviderCallSid) return;
+  try {
+    const { hangupVobizCall } = require("../telephony/vobizProxy");
+    await hangupVobizCall(task.currentProviderCallSid, task.orgId);
+  } catch (err) {
+    log.error(`❌ [autoDialEngine] Failed to force-hang-up call for task ${task.id} (org ${task.orgId}):`, err.message);
+  }
+}
+
+function registerAutoDialWorker() {
+  const queue = getQueue();
+  if (!dialQueueRegistered) {
+    queue.process("placeDial", handlePlaceDialJob, { concurrency: DIAL_CONCURRENCY });
+    dialQueueRegistered = true;
+  }
+}
+
+module.exports = { processAutoDialTasks, registerAutoDialWorker, forceHangupCurrentCall };

@@ -1,0 +1,7 @@
+# docker-compose.caddy.uat.yml — overrides Caddyfile for UAT (plain HTTP on IP)
+services:
+  caddy:
+    volumes:
+      - ./caddy/Caddyfile.uat:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config

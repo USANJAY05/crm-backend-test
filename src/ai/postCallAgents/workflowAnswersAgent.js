@@ -1,0 +1,103 @@
+// src/ai/postCallAgents/workflowAnswersAgent.js
+// ============================================================
+// Post-call workflow Q&A extraction — re-reads the transcript against the
+// workflow's assigned questions and pulls out each answer, labeled by the
+// workflow variable's name (see DialerSimulator.tsx's "Extracted Campaign
+// Answers" panel, which displays these).
+// ============================================================
+
+const { z } = require("zod");
+const { getEffectivePrompt } = require("../systemAgents");
+const { generateStructured } = require("./shared");
+
+// Structured-output/function-calling schemas need an object at the root
+// (a bare top-level array isn't valid there) — the array of answers is
+// nested under `answers` and unwrapped again below.
+const QAExtractionSchema = z.object({
+  answers: z.array(z.object({
+    question: z.string().min(1),
+    answer: z.string().default(""),
+  })).default([]),
+});
+
+// Accepts either legacy plain-string questions or the newer
+// { label, question, dataType } shape (label = short key like
+// "customer_budget", question = full text asked aloud, dataType = the
+// workflow variable's declared type — text/number/boolean/date/choice)
+// and normalizes to that shape. A plain string's label defaults to its
+// own text and gets no dataType, so legacy callers see identical output
+// to before dataType existed.
+function normalizeQuestions(questions) {
+  return (questions || []).map((q) =>
+    typeof q === "string"
+      ? { label: q, question: q, dataType: undefined }
+      : { label: q.label || q.question, question: q.question || q.label, dataType: q.dataType }
+  );
+}
+
+// Per-type formatting instructions given to the model alongside each
+// question, so the extracted answer actually matches what the workflow
+// variable declared it should be instead of always being whatever loose
+// phrase the caller happened to say.
+const TYPE_INSTRUCTIONS = {
+  number: "reply with digits only (e.g. \"30\", not \"thirty years\" or \"around 30\")",
+  boolean: "reply with exactly \"Yes\" or \"No\"",
+  date: "reply with a clear date (e.g. \"2026-09-20\" or \"20 Sep 2026\"), resolving relative phrases like \"next Monday\" if the transcript gives enough context",
+  choice: "reply with exactly one of the options the caller chose, worded as they said it",
+  text: "reply with the caller's answer as a short plain phrase",
+};
+
+// Deterministic, safe normalization applied AFTER the model replies —
+// only for booleans, since "Yes"/"No" synonyms (yeah, nope, definitely,
+// no way) are the one case that's both common and unambiguous to fix up
+// without risking losing real information a number/date/text answer
+// might carry (e.g. "1 Crore" or "30 years" stripped down to bare digits
+// would throw away a real unit the rest of the app still needs to show).
+const YES_WORDS = /^(y|yes|yeah|yep|yup|sure|correct|true|definitely|of course)\b/i;
+const NO_WORDS = /^(n|no|nope|nah|not really|never|false)\b/i;
+function coerceAnswer(answer, dataType) {
+  if (dataType !== "boolean" || !answer) return answer;
+  const trimmed = answer.trim();
+  if (YES_WORDS.test(trimmed)) return "Yes";
+  if (NO_WORDS.test(trimmed)) return "No";
+  return answer;
+}
+
+async function extractWorkflowAnswers(transcript, questions, orgId = null, onUsage) {
+  const normalized = normalizeQuestions(questions);
+  if (!transcript?.trim() || !normalized.length) return [];
+  const template = await getEffectivePrompt(orgId, "workflow-answer-extractor");
+  const prompt = template
+    .replace("{questions}", normalized.map((q, i) => {
+      const typeNote = q.dataType && TYPE_INSTRUCTIONS[q.dataType]
+        ? ` (Expected type: ${q.dataType} — ${TYPE_INSTRUCTIONS[q.dataType]})`
+        : "";
+      return `${i + 1}. ${q.question}${typeNote}`;
+    }).join("\n"))
+    .replace("{transcript}", transcript);
+  const parsed = await generateStructured({
+    label: "qa-extraction",
+    orgId,
+    prompt,
+    schema: QAExtractionSchema,
+    fallback: { answers: [] },
+    onUsage,
+  });
+  const results = parsed.answers;
+
+  // Re-attach each result's label by matching back to the original question
+  // text (the LLM only ever echoes `question`/`answer`) — exact match first,
+  // falling back to positional index if the LLM reworded a question. Then
+  // apply the safe post-hoc coercion above using that same matched
+  // question's declared type.
+  return results.map((r, i) => {
+    const match = normalized.find((q) => q.question === r.question) || normalized[i];
+    return {
+      label: match ? match.label : r.question,
+      question: r.question,
+      answer: coerceAnswer(r.answer, match?.dataType),
+    };
+  });
+}
+
+module.exports = { normalizeQuestions, extractWorkflowAnswers };

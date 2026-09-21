@@ -1,0 +1,482 @@
+﻿<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>ChiefVoice — Call History</title>
+  <style>
+    *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+    :root {
+      --bg: #0b0f19;
+      --surface: #0f172a;
+      --card: #1e293b;
+      --border: rgba(255,255,255,0.08);
+      --violet: #8b5cf6;
+      --cyan: #06b6d4;
+      --emerald: #10b981;
+      --amber: #f59e0b;
+      --red: #ef4444;
+      --text: #f1f5f9;
+      --muted: #94a3b8;
+      --blue: #3b82f6;
+    }
+    body { background: var(--bg); color: var(--text); font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; min-height: 100vh; }
+    .accent-bar { height: 3px; background: linear-gradient(90deg, var(--violet), var(--blue), var(--cyan), var(--emerald)); }
+    
+    /* ── HEADER ── */
+    .navbar { display: flex; align-items: center; justify-content: space-between; padding: 16px 28px; border-bottom: 1px solid var(--border); background: rgba(11,15,25,0.9); position: sticky; top: 0; z-index: 50; backdrop-filter: blur(12px); }
+    .nav-brand { display: flex; align-items: center; gap: 10px; text-decoration: none; }
+    .nav-logo { width: 34px; height: 34px; background: linear-gradient(135deg, var(--violet), var(--cyan)); border-radius: 8px; display: flex; align-items: center; justify-content: center; font-size: 16px; color: #fff; }
+    .nav-title { font-size: 15px; font-weight: 700; color: #fff; }
+    .nav-sub { font-size: 10px; color: var(--muted); letter-spacing: 1px; text-transform: uppercase; }
+    .nav-back { display: flex; align-items: center; gap: 6px; color: var(--muted); font-size: 13px; text-decoration: none; border: 1px solid var(--border); border-radius: 8px; padding: 6px 14px; transition: all 0.2s; }
+    .nav-back:hover { color: #fff; border-color: var(--violet); }
+
+    /* ── MAIN DASHBOARD ── */
+    .main { padding: 32px 28px; max-width: 1200px; margin: 0 auto; }
+    .page-title { font-size: 26px; font-weight: 800; color: #fff; letter-spacing: -.5px; margin-bottom: 4px; }
+    .page-sub { font-size: 14px; color: var(--muted); margin-bottom: 28px; }
+    .stats-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 16px; margin-bottom: 32px; }
+    .stat-card { background: rgba(30,41,59,0.5); border: 1px solid var(--border); border-radius: 12px; padding: 20px; }
+    .stat-label { font-size: 11px; color: var(--muted); letter-spacing: 1px; text-transform: uppercase; margin-bottom: 8px; }
+    .stat-value { font-size: 28px; font-weight: 800; color: #fff; }
+    .stat-sub { font-size: 12px; color: var(--muted); margin-top: 3px; }
+    .stat-card.violet { border-color: rgba(139,92,246,0.3); }
+    .stat-card.emerald { border-color: rgba(16,185,129,0.3); }
+    .stat-card.amber { border-color: rgba(245,158,11,0.3); }
+    .stat-card.red { border-color: rgba(239,68,68,0.3); }
+
+    .search-bar { display: flex; align-items: center; gap: 12px; background: rgba(30,41,59,0.5); border: 1px solid var(--border); border-radius: 12px; padding: 0 16px; margin-bottom: 20px; }
+    .search-input { background: transparent; border: none; outline: none; color: var(--text); font-size: 14px; padding: 14px 0; flex: 1; }
+    .search-input::placeholder { color: var(--muted); }
+    .filters { display: flex; gap: 8px; margin-bottom: 20px; flex-wrap: wrap; }
+    .filter-pill { padding: 5px 14px; border-radius: 20px; font-size: 12px; font-weight: 600; border: 1px solid var(--border); color: var(--muted); cursor: pointer; transition: all 0.2s; background: transparent; }
+    .filter-pill.active { background: var(--violet); border-color: var(--violet); color: #fff; }
+    .filter-pill:hover:not(.active) { border-color: var(--violet); color: #fff; }
+
+    .calls-table { width: 100%; border-collapse: collapse; }
+    .calls-table thead tr { border-bottom: 1px solid var(--border); }
+    .calls-table th { text-align: left; padding: 10px 16px; font-size: 11px; font-weight: 600; color: var(--muted); letter-spacing: 0.8px; text-transform: uppercase; }
+    .calls-table tbody tr { border-bottom: 1px solid var(--border); cursor: pointer; transition: background 0.15s; }
+    .calls-table tbody tr:hover { background: rgba(139,92,246,0.06); }
+    .calls-table td { padding: 14px 16px; font-size: 14px; vertical-align: middle; }
+    
+    .caller-cell { display: flex; align-items: center; gap: 10px; }
+    .caller-avatar { width: 36px; height: 36px; border-radius: 50%; background: linear-gradient(135deg, var(--violet), var(--cyan)); display: flex; align-items: center; justify-content: center; font-size: 13px; font-weight: 700; color: #fff; flex-shrink: 0; }
+    .caller-number { font-weight: 600; color: #fff; }
+    .caller-agent { font-size: 12px; color: var(--muted); }
+    .sentiment-badge { display: inline-flex; align-items: center; gap: 5px; padding: 3px 10px; border-radius: 20px; font-size: 12px; font-weight: 600; }
+    .sentiment-badge.Positive { background: rgba(16,185,129,0.15); color: #34d399; }
+    .sentiment-badge.Neutral { background: rgba(100,116,139,0.15); color: #94a3b8; }
+    .sentiment-badge.Negative { background: rgba(239,68,68,0.15); color: #f87171; }
+    .recording-btn { display: inline-flex; align-items: center; gap: 5px; padding: 5px 12px; border-radius: 8px; font-size: 12px; font-weight: 600; background: rgba(139,92,246,0.15); border: 1px solid rgba(139,92,246,0.3); color: var(--violet); cursor: pointer; }
+    .recording-btn.no-rec { background: rgba(255,255,255,0.04); border-color: var(--border); color: var(--muted); cursor: default; }
+
+    /* ── FULL SCREEN / DETAILED OVERLAY MODAL ── */
+    .modal-overlay { position: fixed; inset: 0; background: #060913; z-index: 100; opacity: 0; pointer-events: none; transition: opacity 0.25s; overflow-y: auto; display: flex; flex-direction: column; }
+    .modal-overlay.open { opacity: 1; pointer-events: all; }
+    
+    /* MODAL HEADER LAYOUT FROM IMAGE */
+    .premium-header { display: flex; align-items: center; justify-content: space-between; padding: 18px 32px; background: rgba(15, 23, 42, 0.4); border-bottom: 1px solid var(--border); flex-wrap: wrap; gap: 20px; }
+    .header-left { display: flex; align-items: center; gap: 16px; }
+    .back-btn { display: inline-flex; align-items: center; gap: 8px; padding: 10px 18px; border-radius: 8px; border: 1px solid var(--border); background: #1e293b; color: #fff; text-decoration: none; font-size: 13px; font-weight: 600; cursor: pointer; transition: background 0.2s; }
+    .back-btn:hover { background: #334155; }
+    .call-meta-info { display: flex; flex-direction: column; }
+    .campaign-pill { font-size: 9px; font-weight: 700; color: var(--blue); background: rgba(59,130,246,0.15); border: 1px solid rgba(59,130,246,0.3); padding: 2px 8px; border-radius: 4px; text-transform: uppercase; width: fit-content; margin-bottom: 4px; letter-spacing: 0.5px; }
+    .analysis-title { font-size: 20px; font-weight: 700; color: #fff; }
+    .analysis-subtitle { font-size: 12px; color: var(--muted); margin-top: 2px; }
+
+    /* CUSTOM DUAL-CHANNEL AUDIO PLAYER */
+    .custom-player { display: flex; align-items: center; gap: 16px; background: #1e293b; border-radius: 40px; padding: 8px 24px; min-width: 380px; max-width: 500px; border: 1px solid var(--border); }
+    .play-trigger { width: 34px; height: 34px; border-radius: 50%; background: #10b981; color: #fff; border: none; display: flex; align-items: center; justify-content: center; font-size: 14px; cursor: pointer; transition: transform 0.15s; }
+    .play-trigger:hover { transform: scale(1.05); }
+    .track-details { flex: 1; font-size: 12px; font-weight: 600; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; display: flex; align-items: center; gap: 8px; }
+    .progress-bar-container { flex: 2; height: 6px; background: rgba(255,255,255,0.1); border-radius: 3px; position: relative; cursor: pointer; min-width: 80px; }
+    .progress-fill { height: 100%; width: 0%; background: #10b981; border-radius: 3px; position: absolute; left: 0; top: 0; }
+    .time-stamp { font-size: 11px; font-weight: 600; color: var(--muted); }
+    .speed-btn { background: transparent; border: 1px solid var(--border); color: var(--muted); padding: 4px 8px; border-radius: 6px; font-size: 11px; font-weight: 700; cursor: pointer; transition: all 0.15s; }
+    .speed-btn.active { background: var(--blue); color: #fff; border-color: var(--blue); }
+
+    .header-right { display: flex; align-items: center; gap: 12px; }
+    .intent-badge { display: flex; flex-direction: column; align-items: center; background: rgba(30,41,59,0.6); padding: 8px 16px; border-radius: 8px; border: 1px solid var(--border); }
+    .badge-label { font-size: 9px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 2px; }
+    .badge-val { font-size: 13px; font-weight: 700; color: #fff; }
+
+    /* MODAL BODY LAYOUT */
+    .modal-content-grid { display: grid; grid-template-columns: 2fr 1fr; gap: 32px; padding: 32px; max-width: 1400px; width: 100%; margin: 0 auto; flex: 1; }
+    
+    /* LEFT COLUMN: DUAL CHANNEL TRANSCRIPT */
+    .transcript-card { background: rgba(30, 41, 59, 0.2); border: 1px solid var(--border); border-radius: 16px; padding: 24px; display: flex; flex-direction: column; }
+    .transcript-header { font-size: 13px; font-weight: 700; text-transform: uppercase; color: var(--muted); letter-spacing: 1px; margin-bottom: 24px; border-bottom: 1px solid var(--border); padding-bottom: 12px; display: flex; justify-content: space-between; }
+    
+    .dual-chat-flow { display: flex; flex-direction: column; gap: 20px; }
+    .chat-bubble-row { display: flex; width: 100%; margin-bottom: 4px; }
+    .chat-bubble-row.ai { justify-content: flex-start; }
+    .chat-bubble-row.user { justify-content: flex-end; }
+    
+    .bubble-wrapper { max-width: 70%; display: flex; flex-direction: column; gap: 4px; }
+    .bubble-meta { font-size: 11px; font-weight: 600; color: var(--muted); display: flex; align-items: center; gap: 6px; }
+    .chat-bubble-row.ai .bubble-meta { justify-content: flex-start; }
+    .chat-bubble-row.user .bubble-meta { justify-content: flex-end; }
+    
+    .bubble-body { padding: 16px 20px; border-radius: 12px; font-size: 14px; line-height: 1.6; }
+    .chat-bubble-row.ai .bubble-body { background: rgba(59, 130, 246, 0.08); border: 1px solid rgba(59, 130, 246, 0.2); color: #e2e8f0; border-top-left-radius: 2px; }
+    .chat-bubble-row.user .bubble-body { background: rgba(255,255,255,0.03); border: 1px solid var(--border); color: #cbd5e1; border-top-right-radius: 2px; }
+    
+    /* RIGHT COLUMN: INTAKE SUMMARY & QUESTIONNAIRE Answers */
+    .insights-col { display: flex; flex-direction: column; gap: 24px; }
+    .summary-card { background: rgba(30, 41, 59, 0.2); border: 1px solid var(--border); border-radius: 16px; padding: 24px; }
+    .summary-title { font-size: 12px; font-weight: 700; text-transform: uppercase; color: var(--muted); letter-spacing: 0.5px; margin-bottom: 12px; }
+    .summary-text { font-size: 13px; line-height: 1.7; color: var(--muted); font-style: italic; background: rgba(255,255,255,0.02); padding: 16px; border-radius: 8px; border-left: 3px solid var(--violet); }
+    
+    .qa-card { background: rgba(30, 41, 59, 0.2); border: 1px solid var(--border); border-radius: 16px; padding: 24px; }
+    .qa-title { font-size: 12px; font-weight: 700; text-transform: uppercase; color: var(--muted); letter-spacing: 0.5px; margin-bottom: 16px; border-bottom: 1px solid var(--border); padding-bottom: 8px; }
+    
+    .qa-list { display: flex; flex-direction: column; gap: 16px; }
+    .qa-item { background: rgba(255, 255, 255, 0.02); border: 1px solid var(--border); border-radius: 12px; padding: 16px; }
+    .qa-num-q { font-size: 12px; font-weight: 700; color: var(--blue); margin-bottom: 8px; }
+    .qa-ans { font-size: 13px; font-weight: 600; color: var(--emerald); display: flex; align-items: center; gap: 6px; }
+
+    @media(max-width: 1000px) {
+      .modal-content-grid { grid-template-columns: 1fr; }
+      .premium-header { padding: 16px; }
+      .custom-player { min-width: 100%; }
+    }
+  </style>
+</head>
+<body>
+<div class="accent-bar"></div>
+<nav class="navbar">
+  <a class="nav-brand" href="/">
+    <div class="nav-logo">⚡</div>
+    <div><div class="nav-title">ChiefVoice</div><div class="nav-sub">CRM Intelligence</div></div>
+  </a>
+  <a class="nav-back" href="/">← Dashboard</a>
+</nav>
+
+<div class="main">
+  <div class="page-title">📞 Call History</div>
+  <div class="page-sub">All incoming AI-handled calls — with transcripts and recordings</div>
+  
+  <div class="stats-row">
+    <div class="stat-card violet"><div class="stat-label">Total Calls</div><div class="stat-value" id="stat-total">—</div><div class="stat-sub">All time</div></div>
+    <div class="stat-card emerald"><div class="stat-label">Positive</div><div class="stat-value" id="stat-positive">—</div><div class="stat-sub">Sentiment</div></div>
+    <div class="stat-card amber"><div class="stat-label">Avg Duration</div><div class="stat-value" id="stat-avg-dur">—</div><div class="stat-sub">Per call</div></div>
+    <div class="stat-card red"><div class="stat-label">With Recordings</div><div class="stat-value" id="stat-recordings">—</div><div class="stat-sub">Stored in cloud</div></div>
+  </div>
+
+  <div class="search-bar">
+    <input class="search-input" id="search-input" type="text" placeholder="Search by caller, agent, sentiment…" />
+  </div>
+
+  <div class="filters">
+    <button class="filter-pill active" data-filter="all">All Calls</button>
+    <button class="filter-pill" data-filter="Positive">✅ Positive</button>
+    <button class="filter-pill" data-filter="Neutral">😐 Neutral</button>
+    <button class="filter-pill" data-filter="Negative">❌ Negative</button>
+    <button class="filter-pill" data-filter="recording">🎙️ Has Recording</button>
+  </div>
+
+  <div id="table-container"><div class="loading"><div class="spinner"></div> Loading calls…</div></div>
+</div>
+
+<!-- FULL DETAILED OVERLAY MODAL -->
+<div class="modal-overlay" id="modal-overlay">
+  <!-- AUDIO ELEMENT -->
+  <audio id="core-audio" style="display:none;"></audio>
+
+  <!-- OVERLAY HEADER -->
+  <div class="premium-header">
+    <div class="header-left">
+      <button class="back-btn" onclick="closeModal()">← Back</button>
+      <div class="call-meta-info">
+        <span class="campaign-pill" id="header-camp">OUTBOUND DIAL</span>
+        <div class="analysis-title" id="header-title">Amanda Ross Call Analysis</div>
+        <div class="analysis-subtitle" id="header-subtitle">Campaign: Today's Credit Pre-Qualification Survey</div>
+      </div>
+    </div>
+
+    <!-- CUSTOM AUDIO PLAYER CONTROLS -->
+    <div class="custom-player" id="custom-player-ui">
+      <button class="play-trigger" id="audio-play-btn" onclick="toggleAudio()">▶</button>
+      <div class="track-details" id="audio-filename">Amanda_Ross_recording.wav</div>
+      <div class="progress-bar-container" id="audio-progress-container" onclick="seekAudio(event)">
+        <div class="progress-fill" id="audio-progress-fill"></div>
+      </div>
+      <div class="time-stamp" id="audio-time">00:00 / 00:00</div>
+      <button class="speed-btn active" id="spd-1x" onclick="setSpeed(1.0)">1x</button>
+      <button class="speed-btn" id="spd-1.5x" onclick="setSpeed(1.5)">1.5x</button>
+      <button class="speed-btn" id="spd-2x" onclick="setSpeed(2.0)">2x</button>
+    </div>
+
+    <div class="header-right">
+      <div class="intent-badge">
+        <span class="badge-label">INTENT</span>
+        <span class="badge-val" style="color:var(--blue);" id="header-intent">Not Interested</span>
+      </div>
+      <div class="intent-badge">
+        <span class="badge-label">SENTIMENT</span>
+        <span class="badge-val" style="color:var(--emerald);" id="header-sentiment">Positive</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- OVERLAY CONTENT GRID -->
+  <div class="modal-content-grid">
+    <!-- LEFT: TRANSCRIPT -->
+    <div class="transcript-card">
+      <div class="transcript-header">
+        <span>💬 Conversation Dialogue Transcript</span>
+        <span style="font-size:11px;color:var(--muted)">Dual-channel synthesis</span>
+      </div>
+      <div class="dual-chat-flow" id="transcript-flow">
+        <!-- Bubbles injected here -->
+      </div>
+    </div>
+
+    <!-- RIGHT: SUMMARY AND QA -->
+    <div class="insights-col">
+      <div class="summary-card">
+        <div class="summary-title">AI Summarized Intake</div>
+        <div class="summary-text" id="summary-ai">"No details collected yet."</div>
+      </div>
+
+      <div class="qa-card">
+        <div class="qa-title">✓ Extracted Campaign Answers</div>
+        <div class="qa-list" id="qa-answers-list">
+          <!-- Injected dynamically from lead_responses -->
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+let allCalls=[], activeFilter='all', searchQuery='';
+let activeAudio = document.getElementById('core-audio');
+let isPlaying = false;
+
+// This page shares an origin with the main dashboard, so it reuses the
+// same session token from localStorage rather than needing its own login.
+function authHeaders(){
+  const token = localStorage.getItem('chiefx_auth_token');
+  return token ? { 'Authorization': `Bearer ${token}` } : {};
+}
+
+async function loadCalls(){
+  try{
+    const r=await fetch('/api/calls', { headers: authHeaders() });
+    if (r.status === 401 || r.status === 403) {
+      document.getElementById('table-container').innerHTML = `<div class="empty-state">Please log in via the main dashboard first, then reload this page.</div>`;
+      return;
+    }
+    allCalls=await r.json();
+    updateStats(); renderTable();
+  } catch(e){ document.getElementById('table-container').innerHTML=`<div class="empty-state">Failed: ${e.message}</div>`; }
+}
+
+function updateStats(){
+  const t=allCalls.length, p=allCalls.filter(c=>c.sentiment==='Positive').length,
+        avg=t?Math.round(allCalls.reduce((a,c)=>a+(c.duration_seconds||0),0)/t):0,
+        r=allCalls.filter(c=>c.recording_url).length;
+  document.getElementById('stat-total').textContent=t;
+  document.getElementById('stat-positive').textContent=p;
+  document.getElementById('stat-avg-dur').textContent=avg+'s';
+  document.getElementById('stat-recordings').textContent=r;
+}
+
+function getFiltered(){
+  return allCalls.filter(c=>{
+    const ms=activeFilter==='all'||(activeFilter==='recording'&&c.recording_url)||c.sentiment===activeFilter;
+    const q=searchQuery.toLowerCase();
+    return ms&&(!q||(c.caller_number||'').toLowerCase().includes(q)||(c.agent_name||'').toLowerCase().includes(q));
+  });
+}
+
+function fmtDur(s){if(!s)return'—';const m=Math.floor(s/60),r=s%60;return m?`${m}m ${r}s`:`${r}s`;}
+function esc(t){return(t||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
+
+function renderTable(){
+  const calls=getFiltered();
+  if(!calls.length){document.getElementById('table-container').innerHTML=`<div class="empty-state">No calls found.</div>`;return;}
+  const rows=calls.map(c=>{
+    const init=(c.caller_number||'UN').replace(/\D/g,'').slice(-4)||'UN';
+    const d=new Date(c.created_at);
+    const ds=d.toLocaleDateString('en-IN',{day:'numeric',month:'short'});
+    const ts=d.toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit',hour12:true});
+    const sent=c.sentiment||'Neutral';
+    const dot=sent==='Positive'?'🟢':sent==='Negative'?'🔴':'⚪';
+    return `<tr onclick="openModal('${c.id}')">
+      <td><div class="caller-cell"><div class="caller-avatar">${init}</div><div><div class="caller-number">${esc(c.caller_number||'Unknown')}</div><div class="caller-agent">${esc(c.agent_name||'Arjun')}</div></div></div></td>
+      <td><span class="sentiment-badge ${sent}">${dot} ${sent}</span></td>
+      <td>${fmtDur(c.duration_seconds)}</td>
+      <td><span class="duration-cell" style="font-size:12px;">${ds}<br>${ts}</span></td>
+      <td>${c.recording_url?`<span class="recording-btn" onclick="event.stopPropagation();openModal('${c.id}')">🎙️ Play</span>`:`<span class="recording-btn no-rec">No recording</span>`}</td>
+      <td><button class="view-btn">View →</button></td>
+    </tr>`;
+  }).join('');
+  document.getElementById('table-container').innerHTML=`<table class="calls-table"><thead><tr><th>Caller</th><th>Sentiment</th><th>Duration</th><th>Date & Time</th><th>Recording</th><th></th></tr></thead><tbody>${rows}</tbody></table>`;
+}
+
+async function openModal(id){
+  const c=allCalls.find(x=>x.id===id); if(!c)return;
+  const d=new Date(c.created_at);
+  const ds=d.toLocaleDateString('en-IN',{day:'numeric',month:'long',year:'numeric'})+' · '+d.toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit',hour12:true});
+  
+  // Header Meta
+  document.getElementById('header-title').textContent=`Call from ${c.caller_number || 'Unknown'}`;
+  document.getElementById('header-subtitle').textContent=`Handled by agent ${c.agent_name || 'Arjun'} · ${ds}`;
+  document.getElementById('header-sentiment').textContent=c.sentiment || 'Neutral';
+  
+  // Colors for sentiment
+  const sentColor=c.sentiment==='Positive'?'var(--emerald)':(c.sentiment==='Negative'?'var(--red)':'var(--muted)');
+  document.getElementById('header-sentiment').style.color=sentColor;
+
+  // Custom Audio Setup
+  const pUI = document.getElementById('custom-player-ui');
+  if(c.recording_url){
+    pUI.style.display='flex';
+    activeAudio.src=c.recording_url;
+    document.getElementById('audio-filename').textContent=`recording_${c.id.slice(0,6)}.mp3`;
+  } else {
+    pUI.style.display='none';
+    activeAudio.removeAttribute('src');
+  }
+
+  // Load Extracted QA Answers from database
+  const qaContainer = document.getElementById('qa-answers-list');
+  qaContainer.innerHTML = '<div class="loading"><div class="spinner"></div> Extracting details...</div>';
+  
+  let dynamicSummary = "Call has been processed. Detailed questionnaire below.";
+  try {
+    const res = await fetch(`/api/calls/${c.id}/lead-responses`, { headers: authHeaders() });
+    const qaAnswers = await res.json();
+    if(qaAnswers && qaAnswers.length > 0) {
+      qaContainer.innerHTML = qaAnswers.map((item, idx) => `
+        <div class="qa-item">
+          <div class="qa-num-q">Q${idx+1}: ${esc(item.question)}</div>
+          <div class="qa-ans">✓ "${esc(item.answer)}"</div>
+        </div>
+      `).join('');
+      // Dynamic Intake Summary
+      dynamicSummary = qaAnswers.map(item => `"${esc(item.answer)}"`).join(' · ');
+    } else {
+      qaContainer.innerHTML = '<div class="empty-state" style="padding:10px;">No answers extracted for this call.</div>';
+    }
+  } catch(err) {
+    qaContainer.innerHTML = '<div class="empty-state" style="padding:10px;">Failed to load answers.</div>';
+  }
+  document.getElementById('summary-ai').textContent = `"${dynamicSummary}"`;
+
+  // Intent Inference
+  const hasDetails = dynamicSummary !== "Call has been processed. Detailed questionnaire below.";
+  document.getElementById('header-intent').textContent = hasDetails ? "Interested" : "Not Interested";
+  document.getElementById('header-intent').style.color = hasDetails ? "var(--emerald)" : "var(--blue)";
+
+  // Transcript Bubbles
+  renderTranscript(c.transcript, c.agent_name || 'AI');
+
+  document.getElementById('modal-overlay').classList.add('open');
+  document.body.style.overflow='hidden';
+}
+
+function renderTranscript(raw, agentName){
+  const flow = document.getElementById('transcript-flow');
+  if(!raw){
+    flow.innerHTML = '<div class="empty-state">No conversation transcript recorded.</div>';
+    return;
+  }
+  const lines=raw.split('\n').map(l=>l.trim()).filter(Boolean);
+  const parsed = lines.map((l, i)=>{
+    const ai=l.match(/^(?:AI|Agent|Arjun|Priya|Dev|Kavya|assistant|model)[:：]\s*(.*)/i);
+    const usr=l.match(/^(?:User|Caller|Customer|Human)[:：]\s*(.*)/i);
+    const timeStr = new Date(Date.now() - (lines.length - i)*8000).toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:false});
+    if(ai) return { role: 'ai', text: ai[1], time: timeStr };
+    if(usr) return { role: 'user', text: usr[1], time: timeStr };
+    // fallback if prefix missing
+    return { role: i % 2 === 0 ? 'ai' : 'user', text: l, time: timeStr };
+  });
+
+  flow.innerHTML = parsed.map(bubble => `
+    <div class="chat-bubble-row ${bubble.role}">
+      <div class="bubble-wrapper">
+        <div class="bubble-meta">
+          ${bubble.role === 'ai' ? `⚡ ${agentName}` : '👤 Caller'} · ${bubble.time}
+        </div>
+        <div class="bubble-body">
+          ${esc(bubble.text)}
+        </div>
+      </div>
+    </div>
+  `).join('');
+}
+
+function closeModal(){
+  document.getElementById('modal-overlay').classList.remove('open');
+  activeAudio.pause();
+  isPlaying = false;
+  document.getElementById('audio-play-btn').textContent = '▶';
+  document.body.style.overflow='';
+}
+
+// ── AUDIO PLAYER CONTROLS ──
+function toggleAudio(){
+  if(!activeAudio.src) return;
+  if(isPlaying){
+    activeAudio.pause();
+    document.getElementById('audio-play-btn').textContent = '▶';
+    isPlaying = false;
+  } else {
+    activeAudio.play();
+    document.getElementById('audio-play-btn').textContent = '⏸';
+    isPlaying = true;
+  }
+}
+
+function setSpeed(spd){
+  activeAudio.playbackRate = spd;
+  document.querySelectorAll('.speed-btn').forEach(btn => btn.classList.remove('active'));
+  if(spd === 1.0) document.getElementById('spd-1x').classList.add('active');
+  if(spd === 1.5) document.getElementById('spd-1.5x').classList.add('active');
+  if(spd === 2.0) document.getElementById('spd-2x').classList.add('active');
+}
+
+function seekAudio(e){
+  const container = document.getElementById('audio-progress-container');
+  const pct = e.offsetX / container.offsetWidth;
+  activeAudio.currentTime = pct * activeAudio.duration;
+}
+
+activeAudio.addEventListener('timeupdate', () => {
+  if(!activeAudio.duration) return;
+  const pct = (activeAudio.currentTime / activeAudio.duration) * 100;
+  document.getElementById('audio-progress-fill').style.width = pct + '%';
+  
+  const curMin = String(Math.floor(activeAudio.currentTime / 60)).padStart(2,'0');
+  const curSec = String(Math.floor(activeAudio.currentTime % 60)).padStart(2,'0');
+  const durMin = String(Math.floor(activeAudio.duration / 60)).padStart(2,'0');
+  const durSec = String(Math.floor(activeAudio.duration % 60)).padStart(2,'0');
+  document.getElementById('audio-time').textContent = `${curMin}:${curSec} / ${durMin}:${durSec}`;
+});
+
+activeAudio.addEventListener('ended', () => {
+  isPlaying = false;
+  document.getElementById('audio-play-btn').textContent = '▶';
+  document.getElementById('audio-progress-fill').style.width = '0%';
+});
+
+// Search inputs
+document.getElementById('search-input').addEventListener('input', e=>{
+  searchQuery = e.target.value;
+  renderTable();
+});
+
+document.querySelectorAll('.filter-pill').forEach(b=>b.addEventListener('click',()=>{
+  document.querySelectorAll('.filter-pill').forEach(x=>x.classList.remove('active'));
+  b.classList.add('active'); activeFilter=b.dataset.filter; renderTable();
+}));
+
+loadCalls();
+</script>
+</body>
+</html>

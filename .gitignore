@@ -1,0 +1,12 @@
+node_modules
+data
+temp
+dashboard
+secrets/
+
+# Environment files — contain real credentials, never commit
+.env
+.env.dev
+.env.uat
+.env.prod
+.DS_Store

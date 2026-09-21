@@ -1,0 +1,27 @@
+# docker-compose.caddy.yml
+# Prod/UAT: Caddy reverse proxy — JWT auth handled by the backend directly.
+#
+# Required env vars:
+#   DOMAIN — e.g. api.uat.elvoryx.in
+
+services:
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      DOMAIN: ${DOMAIN}
+    volumes:
+      - ./caddy/Caddyfile.prod:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - app
+    networks:
+      - internal
+
+volumes:
+  caddy_data:
+  caddy_config:

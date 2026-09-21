@@ -1,0 +1,11 @@
+# docker-compose.keycloak.prod.yml
+#
+# Prod override: uses Caddyfile.prod (ACME HTTPS) instead of the dev Caddyfile.
+# Merged on top of docker-compose.keycloak.yml by ./start --prod
+
+services:
+  caddy:
+    volumes:
+      - ./caddy/Caddyfile.prod:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config

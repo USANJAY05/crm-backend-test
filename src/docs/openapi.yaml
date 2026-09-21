@@ -1,0 +1,1575 @@
+openapi: 3.1.0
+
+info:
+  title: ChiefVoice CRM API
+  version: 1.0.0
+  description: |
+    AI-powered voice CRM backend.
+
+    **Authentication:** All protected endpoints require a identity-provider-issued ID token.
+    Pass it as `Authorization: Bearer <token>`.
+    The SSE endpoint `/api/logs-stream` uses a short-lived ticket created by `/api/logs-stream/ticket`
+    because browser EventSource cannot set custom Authorization headers. Other
+    protected endpoints do not accept JWTs in query strings.
+
+    **Roles:** `Organization Admin`, `Super Admin`, `Agent`, `Manager`.
+    Platform-admin endpoints additionally require the email to be in `PLATFORM_ADMIN_EMAILS`.
+
+  contact:
+    name: ChiefVoice Support
+    email: support@chiefvoice.ai
+
+servers:
+  - url: /api
+    description: Current server
+
+tags:
+  - name: Auth
+    description: Session info and authentication-provider helpers
+  - name: Leads
+    description: Lead management
+  - name: Calls
+    description: Outbound and inbound call logs
+  - name: Campaigns
+    description: Campaign and workflow management
+  - name: Enquiries
+    description: Inbound enquiries
+  - name: Loans
+    description: Lending CRM
+  - name: Catalog
+    description: Products, orders, customers, khata
+  - name: Channels
+    description: WhatsApp / Instagram channel config and conversations
+  - name: Config
+    description: AI agent persona, questions, presets
+  - name: Settings
+    description: Virtual numbers, team members, org settings
+  - name: Knowledge
+    description: Document knowledge base
+  - name: Compliance
+    description: DNC list and compliance rules
+  - name: Dashboard
+    description: Analytics and metrics
+  - name: AI
+    description: Gemini insights, scoring, email/WhatsApp integrations
+  - name: Telephony
+    description: Vobiz webhook endpoints
+  - name: Webhooks
+    description: Inbound webhooks from Meta (WhatsApp / Instagram)
+  - name: Admin
+    description: Platform admin — audit log, billing, SSE log stream
+  - name: Platform
+    description: Cross-org platform operator endpoints
+  - name: Objects
+    description: Dynamic custom CRM object schema + records
+
+# ── Security scheme ──────────────────────────────────────────────────────────
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: Authentication ID token
+
+  parameters:
+    OrgId:
+      name: X-Org-Id
+      in: header
+      description: Resolved automatically from token — do not pass manually
+      required: false
+      schema:
+        type: string
+
+  responses:
+    Unauthorized:
+      description: Missing or invalid token
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    Forbidden:
+      description: Insufficient role or org suspended
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    NotFound:
+      description: Resource not found
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    ServerError:
+      description: Internal server error
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+
+  schemas:
+    Error:
+      type: object
+      properties:
+        error:
+          type: string
+        details:
+          type: string
+
+    Org:
+      type: object
+      properties:
+        id:          { type: string }
+        name:        { type: string }
+        workspaceName: { type: string }
+        industry:    { type: string }
+        subscriptionPlan: { type: string }
+        status:      { type: string, enum: [Active, Suspended] }
+
+    User:
+      type: object
+      properties:
+        id:    { type: string }
+        email: { type: string }
+        name:  { type: string }
+        role:  { type: string }
+
+    Lead:
+      type: object
+      properties:
+        id:        { type: string }
+        name:      { type: string }
+        phone:     { type: string }
+        email:     { type: string }
+        status:    { type: string }
+        score:     { type: number }
+        assignedTo: { type: string }
+        createdAt: { type: string, format: date-time }
+
+    CallLog:
+      type: object
+      properties:
+        id:         { type: string }
+        leadId:     { type: string }
+        duration:   { type: integer }
+        sentiment:  { type: string }
+        transcript: { type: string }
+        createdAt:  { type: string, format: date-time }
+
+    Campaign:
+      type: object
+      properties:
+        id:        { type: string }
+        name:      { type: string }
+        status:    { type: string }
+        leadCount: { type: integer }
+        createdAt: { type: string, format: date-time }
+
+    Workflow:
+      type: object
+      properties:
+        id:     { type: string }
+        name:   { type: string }
+        steps:  { type: array, items: { type: object } }
+        active: { type: boolean }
+
+    VirtualNumber:
+      type: object
+      properties:
+        id:       { type: string }
+        number:   { type: string }
+        provider: { type: string }
+        label:    { type: string }
+
+    TeamMember:
+      type: object
+      properties:
+        id:    { type: string }
+        name:  { type: string }
+        email: { type: string }
+        role:  { type: string }
+
+    Product:
+      type: object
+      properties:
+        id:    { type: string }
+        name:  { type: string }
+        brand: { type: string }
+        unit:  { type: string }
+        price: { type: number }
+        stock: { type: integer }
+
+    Order:
+      type: object
+      properties:
+        id:       { type: string }
+        customer: { type: string }
+        total:    { type: number }
+        status:   { type: string }
+        source:   { type: string }
+
+    Customer:
+      type: object
+      properties:
+        id:       { type: string }
+        name:     { type: string }
+        phone:    { type: string }
+        type:     { type: string }
+        locality: { type: string }
+        ltv:      { type: number }
+        khata:    { type: number }
+
+    Document:
+      type: object
+      properties:
+        id:       { type: string }
+        name:     { type: string }
+        type:     { type: string }
+        uploadedAt: { type: string, format: date-time }
+
+    DncEntry:
+      type: object
+      properties:
+        id:     { type: string }
+        phone:  { type: string }
+        reason: { type: string }
+
+    Channel:
+      type: object
+      properties:
+        id:       { type: string }
+        platform: { type: string, enum: [whatsapp, instagram] }
+        accountId: { type: string }
+        status:   { type: string }
+
+# ── Global security default ───────────────────────────────────────────────────
+security:
+  - BearerAuth: []
+
+# ── Paths ─────────────────────────────────────────────────────────────────────
+paths:
+
+  # ── Auth ──────────────────────────────────────────────────────────────────
+  /auth/login-url:
+    get:
+      tags: [Auth]
+      summary: Get authentication login configuration
+      description: Returns provider-specific login configuration. Development may return a Keycloak OIDC URL; production Identity Platform authentication is initiated by the frontend SDK.
+      security: []
+      parameters:
+        - name: redirect_uri
+          in: query
+          required: true
+          schema: { type: string }
+          description: Frontend callback URL (must be registered with the configured authentication provider)
+      responses:
+        '200':
+          description: Login URL
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  loginUrl:  { type: string, nullable: true }
+                  devMode:   { type: boolean }
+
+  /auth/me:
+    get:
+      tags: [Auth]
+      summary: Current user and org
+      responses:
+        '200':
+          description: Authenticated session
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  user: { $ref: '#/components/schemas/User' }
+                  org:  { $ref: '#/components/schemas/Org' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /auth/industries:
+    get:
+      tags: [Auth]
+      summary: List available industries (public)
+      security: []
+      responses:
+        '200':
+          description: Industry list
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    key:   { type: string }
+                    label: { type: string }
+
+  # ── Leads ─────────────────────────────────────────────────────────────────
+  /leads:
+    get:
+      tags: [Leads]
+      summary: List leads
+      responses:
+        '200':
+          description: Lead list
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: '#/components/schemas/Lead' } }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+    post:
+      tags: [Leads]
+      summary: Create lead
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Lead' }
+      responses:
+        '201':
+          description: Created lead
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Lead' }
+
+  /leads/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string }
+    patch:
+      tags: [Leads]
+      summary: Update lead
+      requestBody:
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Lead' }
+      responses:
+        '200': { description: Updated }
+        '404': { $ref: '#/components/responses/NotFound' }
+    delete:
+      tags: [Leads]
+      summary: Delete lead
+      responses:
+        '200': { description: Deleted }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /lead-responses:
+    get:
+      tags: [Leads]
+      summary: List lead call responses
+      responses:
+        '200': { description: Lead responses }
+    post:
+      tags: [Leads]
+      summary: Create lead response
+      requestBody:
+        content:
+          application/json:
+            schema: { type: object }
+      responses:
+        '201': { description: Created }
+
+  /search:
+    post:
+      tags: [Leads]
+      summary: Search leads / records
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                q:      { type: string }
+                table:  { type: string }
+      responses:
+        '200': { description: Search results }
+
+  /dialer-tasks:
+    get:
+      tags: [Leads]
+      summary: List dialer retry tasks
+      responses:
+        '200': { description: Dialer tasks }
+
+  /dialer-tasks/sync:
+    post:
+      tags: [Leads]
+      summary: Sync / bulk-upsert dialer tasks
+      requestBody:
+        content:
+          application/json:
+            schema: { type: array, items: { type: object } }
+      responses:
+        '200': { description: Synced }
+
+  /dialer-retries:
+    get:
+      tags: [Leads]
+      summary: List pending dialer retries
+      responses:
+        '200': { description: Retries }
+
+  # ── Calls ─────────────────────────────────────────────────────────────────
+  /calls:
+    get:
+      tags: [Calls]
+      summary: List outbound call logs
+      responses:
+        '200':
+          description: Call logs
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: '#/components/schemas/CallLog' } }
+
+  /calls/{id}/transcript:
+    get:
+      tags: [Calls]
+      summary: Get transcript for a call
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200': { description: Transcript }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /calls/{id}/lead-responses:
+    get:
+      tags: [Calls]
+      summary: Get lead qualification responses captured during a call
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200': { description: Lead responses }
+
+  /calls/{id}/analyze:
+    post:
+      tags: [Calls]
+      summary: Re-run AI analysis on a call
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200': { description: Analysis result }
+
+  /call-logs:
+    get:
+      tags: [Calls]
+      summary: List all call logs (outbound + inbound)
+      responses:
+        '200': { description: All call logs }
+    post:
+      tags: [Calls]
+      summary: Create call log entry
+      requestBody:
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CallLog' }
+      responses:
+        '201': { description: Created }
+
+  /call-logs/sync:
+    post:
+      tags: [Calls]
+      summary: Bulk-upsert call logs
+      requestBody:
+        content:
+          application/json:
+            schema: { type: array, items: { type: object } }
+      responses:
+        '200': { description: Synced }
+
+  /inbound-call-logs:
+    get:
+      tags: [Calls]
+      summary: List inbound call logs
+      responses:
+        '200': { description: Inbound call logs }
+
+  /inbound-call-logs/sync:
+    post:
+      tags: [Calls]
+      summary: Bulk-upsert inbound call logs
+      requestBody:
+        content:
+          application/json:
+            schema: { type: array, items: { type: object } }
+      responses:
+        '200': { description: Synced }
+
+  # ── Campaigns ─────────────────────────────────────────────────────────────
+  /campaigns:
+    get:
+      tags: [Campaigns]
+      summary: List campaigns
+      responses:
+        '200':
+          description: Campaigns
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: '#/components/schemas/Campaign' } }
+    post:
+      tags: [Campaigns]
+      summary: Create campaign
+      requestBody:
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Campaign' }
+      responses:
+        '201': { description: Created }
+
+  /campaigns/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string }
+    patch:
+      tags: [Campaigns]
+      summary: Update campaign
+      requestBody:
+        content:
+          application/json:
+            schema: { type: object }
+      responses:
+        '200': { description: Updated }
+
+  /campaigns/sync:
+    post:
+      tags: [Campaigns]
+      summary: Bulk-upsert campaigns
+      requestBody:
+        content:
+          application/json:
+            schema: { type: array, items: { type: object } }
+      responses:
+        '200': { description: Synced }
+
+  /workflows:
+    get:
+      tags: [Campaigns]
+      summary: List automation workflows
+      responses:
+        '200':
+          description: Workflows
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: '#/components/schemas/Workflow' } }
+    post:
+      tags: [Campaigns]
+      summary: Create workflow
+      requestBody:
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Workflow' }
+      responses:
+        '201': { description: Created }
+
+  /workflows/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string }
+    patch:
+      tags: [Campaigns]
+      summary: Update workflow
+      requestBody:
+        content:
+          application/json:
+            schema: { type: object }
+      responses:
+        '200': { description: Updated }
+
+  /workflows/{id}/run:
+    post:
+      tags: [Campaigns]
+      summary: Trigger a workflow run
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200': { description: Run triggered }
+
+  /workflows/{id}/runs:
+    get:
+      tags: [Campaigns]
+      summary: List runs for a workflow
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200': { description: Runs }
+
+  /workflows/sync:
+    post:
+      tags: [Campaigns]
+      summary: Bulk-upsert workflows
+      responses:
+        '200': { description: Synced }
+
+  # ── Enquiries ─────────────────────────────────────────────────────────────
+  /enquiries:
+    get:
+      tags: [Enquiries]
+      summary: List inbound enquiries
+      responses:
+        '200': { description: Enquiries }
+    post:
+      tags: [Enquiries]
+      summary: Create enquiry
+      requestBody:
+        content:
+          application/json:
+            schema: { type: object }
+      responses:
+        '201': { description: Created }
+
+  /enquiries/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string }
+    patch:
+      tags: [Enquiries]
+      summary: Update enquiry
+      responses:
+        '200': { description: Updated }
+    delete:
+      tags: [Enquiries]
+      summary: Delete enquiry
+      responses:
+        '200': { description: Deleted }
+
+  # ── Loans ─────────────────────────────────────────────────────────────────
+  /loans:
+    get:
+      tags: [Loans]
+      summary: List loan applications
+      responses:
+        '200': { description: Loans }
+    post:
+      tags: [Loans]
+      summary: Create loan application
+      requestBody:
+        content:
+          application/json:
+            schema: { type: object }
+      responses:
+        '201': { description: Created }
+
+  /loans/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string }
+    patch:
+      tags: [Loans]
+      summary: Update loan
+      responses:
+        '200': { description: Updated }
+    delete:
+      tags: [Loans]
+      summary: Delete loan
+      responses:
+        '200': { description: Deleted }
+
+  # ── Catalog ───────────────────────────────────────────────────────────────
+  /catalog:
+    get:
+      tags: [Catalog]
+      summary: List products
+      responses:
+        '200':
+          description: Products
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: '#/components/schemas/Product' } }
+    post:
+      tags: [Catalog]
+      summary: Add product
+      requestBody:
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Product' }
+      responses:
+        '201': { description: Created }
+
+  /catalog/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string }
+    patch:
+      tags: [Catalog]
+      summary: Update product
+      responses:
+        '200': { description: Updated }
+
+  /orders:
+    get:
+      tags: [Catalog]
+      summary: List orders
+      responses:
+        '200':
+          description: Orders
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: '#/components/schemas/Order' } }
+    post:
+      tags: [Catalog]
+      summary: Create order
+      requestBody:
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Order' }
+      responses:
+        '201': { description: Created }
+
+  /orders/{id}/status:
+    patch:
+      tags: [Catalog]
+      summary: Update order status
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                status: { type: string }
+      responses:
+        '200': { description: Updated }
+
+  /customers:
+    get:
+      tags: [Catalog]
+      summary: List customers
+      responses:
+        '200':
+          description: Customers
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: '#/components/schemas/Customer' } }
+    post:
+      tags: [Catalog]
+      summary: Create customer
+      requestBody:
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Customer' }
+      responses:
+        '201': { description: Created }
+
+  /customers/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string }
+    get:
+      tags: [Catalog]
+      summary: Get customer
+      responses:
+        '200': { description: Customer }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /khata/{customerId}/payment:
+    post:
+      tags: [Catalog]
+      summary: Record khata payment
+      parameters:
+        - name: customerId
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                amount: { type: number }
+                note:   { type: string }
+      responses:
+        '200': { description: Recorded }
+
+  /khata/{customerId}/reminder:
+    post:
+      tags: [Catalog]
+      summary: Send khata payment reminder
+      parameters:
+        - name: customerId
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200': { description: Reminder sent }
+
+  /questions:
+    get:
+      tags: [Catalog]
+      summary: Get AI qualification questions
+      responses:
+        '200': { description: Questions }
+    post:
+      tags: [Catalog]
+      summary: Replace qualification questions
+      requestBody:
+        content:
+          application/json:
+            schema: { type: array, items: { type: object } }
+      responses:
+        '200': { description: Saved }
+
+  /v2/chroma/search:
+    get:
+      tags: [Catalog]
+      summary: Semantic search in Chroma knowledge store
+      parameters:
+        - name: q
+          in: query
+          required: true
+          schema: { type: string }
+      responses:
+        '200': { description: Results }
+
+  # ── Channels ──────────────────────────────────────────────────────────────
+  /channels:
+    get:
+      tags: [Channels]
+      summary: List connected channels
+      responses:
+        '200':
+          description: Channels
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: '#/components/schemas/Channel' } }
+    post:
+      tags: [Channels]
+      summary: Connect a new channel
+      requestBody:
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Channel' }
+      responses:
+        '201': { description: Created }
+
+  /channels/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string }
+    patch:
+      tags: [Channels]
+      summary: Update channel
+      responses:
+        '200': { description: Updated }
+    delete:
+      tags: [Channels]
+      summary: Delete channel
+      responses:
+        '200': { description: Deleted }
+
+  /conversations:
+    get:
+      tags: [Channels]
+      summary: List conversations
+      responses:
+        '200': { description: Conversations }
+
+  # ── Config ────────────────────────────────────────────────────────────────
+  /config/org:
+    get:
+      tags: [Config]
+      summary: Get org AI agent config
+      responses:
+        '200': { description: Config }
+    post:
+      tags: [Config]
+      summary: Save org AI agent config
+      requestBody:
+        content:
+          application/json:
+            schema: { type: object }
+      responses:
+        '200': { description: Saved }
+
+  /config/org/profile-config:
+    get:
+      tags: [Config]
+      summary: Get org profile config
+      responses:
+        '200': { description: Profile config }
+
+  /config/presets:
+    get:
+      tags: [Config]
+      summary: List presets
+      responses:
+        '200': { description: Presets }
+
+  /config/preset:
+    post:
+      tags: [Config]
+      summary: Save a preset
+      requestBody:
+        content:
+          application/json:
+            schema: { type: object }
+      responses:
+        '201': { description: Saved }
+
+  /config/preset/industry:
+    post:
+      tags: [Config]
+      summary: Apply an industry preset to this org
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                industry: { type: string }
+      responses:
+        '200': { description: Applied }
+
+  /config/preview:
+    post:
+      tags: [Config]
+      summary: Preview AI agent response
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                message: { type: string }
+      responses:
+        '200': { description: Preview response }
+
+  /config/calling-window:
+    get:
+      tags: [Config]
+      summary: Get calling window config
+      responses:
+        '200': { description: Calling window }
+    post:
+      tags: [Config]
+      summary: Save calling window config
+      requestBody:
+        content:
+          application/json:
+            schema: { type: object }
+      responses:
+        '200': { description: Saved }
+
+  # ── Settings ─────────────────────────────────────────────────────────────
+  /settings/numbers:
+    get:
+      tags: [Settings]
+      summary: List virtual numbers
+      responses:
+        '200':
+          description: Numbers
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: '#/components/schemas/VirtualNumber' } }
+    post:
+      tags: [Settings]
+      summary: Add virtual number
+      requestBody:
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/VirtualNumber' }
+      responses:
+        '201': { description: Created }
+
+  /settings/numbers/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string }
+    patch:
+      tags: [Settings]
+      summary: Update number
+      responses:
+        '200': { description: Updated }
+    delete:
+      tags: [Settings]
+      summary: Delete number
+      responses:
+        '200': { description: Deleted }
+
+  /settings/numbers/sync:
+    post:
+      tags: [Settings]
+      summary: Bulk-upsert virtual numbers
+      responses:
+        '200': { description: Synced }
+
+  /settings/team:
+    get:
+      tags: [Settings]
+      summary: List team members
+      responses:
+        '200':
+          description: Team
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: '#/components/schemas/TeamMember' } }
+    post:
+      tags: [Settings]
+      summary: Add team member
+      requestBody:
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/TeamMember' }
+      responses:
+        '201': { description: Created }
+
+  /settings/team/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string }
+    patch:
+      tags: [Settings]
+      summary: Update team member
+      responses:
+        '200': { description: Updated }
+
+  /settings/team/sync:
+    post:
+      tags: [Settings]
+      summary: Bulk-upsert team members
+      responses:
+        '200': { description: Synced }
+
+  /settings/org:
+    get:
+      tags: [Settings]
+      summary: Get org settings
+      responses:
+        '200': { description: Org settings }
+    post:
+      tags: [Settings]
+      summary: Update org settings
+      requestBody:
+        content:
+          application/json:
+            schema: { type: object }
+      responses:
+        '200': { description: Saved }
+
+  # ── Knowledge ─────────────────────────────────────────────────────────────
+  /knowledge/documents:
+    get:
+      tags: [Knowledge]
+      summary: List knowledge documents
+      responses:
+        '200':
+          description: Documents
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: '#/components/schemas/Document' } }
+    post:
+      tags: [Knowledge]
+      summary: Add document (text body)
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name:    { type: string }
+                content: { type: string }
+      responses:
+        '201': { description: Created }
+
+  /knowledge/documents/upload:
+    post:
+      tags: [Knowledge]
+      summary: Upload document file (PDF/DOCX)
+      requestBody:
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                file:
+                  type: string
+                  format: binary
+      responses:
+        '201': { description: Uploaded }
+
+  /knowledge/documents/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string }
+    delete:
+      tags: [Knowledge]
+      summary: Delete document
+      responses:
+        '200': { description: Deleted }
+
+  /knowledge/sync:
+    post:
+      tags: [Knowledge]
+      summary: Sync knowledge base to Chroma
+      responses:
+        '200': { description: Synced }
+
+  # ── Compliance ────────────────────────────────────────────────────────────
+  /compliance/dnc:
+    get:
+      tags: [Compliance]
+      summary: List DNC (Do-Not-Call) entries
+      responses:
+        '200':
+          description: DNC list
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: '#/components/schemas/DncEntry' } }
+    post:
+      tags: [Compliance]
+      summary: Add number to DNC
+      requestBody:
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/DncEntry' }
+      responses:
+        '201': { description: Added }
+
+  /compliance/dnc/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string }
+    delete:
+      tags: [Compliance]
+      summary: Remove DNC entry
+      responses:
+        '200': { description: Removed }
+
+  # ── Dashboard ─────────────────────────────────────────────────────────────
+  /dashboard/stats:
+    get:
+      tags: [Dashboard]
+      summary: Summary stats (calls, leads, conversion)
+      responses:
+        '200': { description: Stats }
+
+  /dashboard/timeseries:
+    get:
+      tags: [Dashboard]
+      summary: Time-series metrics
+      parameters:
+        - name: from
+          in: query
+          schema: { type: string, format: date }
+        - name: to
+          in: query
+          schema: { type: string, format: date }
+      responses:
+        '200': { description: Time series }
+
+  # ── AI ────────────────────────────────────────────────────────────────────
+  /integrations/send-email:
+    post:
+      tags: [AI]
+      summary: Send email via configured provider (Gmail / Resend / Vercel bridge)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [to, subject, body]
+              properties:
+                to:      { type: string }
+                subject: { type: string }
+                body:    { type: string }
+      responses:
+        '200': { description: Sent }
+        '500': { $ref: '#/components/responses/ServerError' }
+
+  /integrations/send-whatsapp:
+    post:
+      tags: [AI]
+      summary: Send WhatsApp message
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [to, message]
+              properties:
+                to:      { type: string }
+                message: { type: string }
+      responses:
+        '200': { description: Sent }
+
+  /gemini/insights:
+    post:
+      tags: [AI]
+      summary: Get Gemini CRM insights for a lead or org
+      requestBody:
+        content:
+          application/json:
+            schema: { type: object }
+      responses:
+        '200': { description: Insights }
+
+  /gemini/score-lead:
+    post:
+      tags: [AI]
+      summary: Score a lead with Gemini
+      requestBody:
+        content:
+          application/json:
+            schema: { type: object }
+      responses:
+        '200': { description: Score }
+
+  /gemini/verify-doc:
+    post:
+      tags: [AI]
+      summary: Verify a document with Gemini
+      requestBody:
+        content:
+          application/json:
+            schema: { type: object }
+      responses:
+        '200': { description: Verification result }
+
+  /simulate-call:
+    post:
+      tags: [AI]
+      summary: Simulate an AI voice call
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                leadId:  { type: string }
+                message: { type: string }
+      responses:
+        '200': { description: Simulation result }
+
+  /vobiz/call:
+    post:
+      tags: [Telephony]
+      summary: Initiate an outbound Vobiz call
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                to:     { type: string }
+                leadId: { type: string }
+      responses:
+        '200': { description: Call initiated }
+
+  /vobiz/hangup:
+    post:
+      tags: [Telephony]
+      summary: Hang up active Vobiz call
+      responses:
+        '200': { description: Hung up }
+
+  # ── Webhooks ──────────────────────────────────────────────────────────────
+  /webhooks/whatsapp:
+    get:
+      tags: [Webhooks]
+      summary: Meta webhook verification challenge
+      security: []
+      responses:
+        '200': { description: Challenge }
+    post:
+      tags: [Webhooks]
+      summary: WhatsApp inbound message webhook
+      security: []
+      responses:
+        '200': { description: OK }
+
+  /webhooks/instagram:
+    get:
+      tags: [Webhooks]
+      summary: Meta webhook verification challenge (Instagram)
+      security: []
+      responses:
+        '200': { description: Challenge }
+    post:
+      tags: [Webhooks]
+      summary: Instagram inbound message webhook
+      security: []
+      responses:
+        '200': { description: OK }
+
+  # ── Admin ─────────────────────────────────────────────────────────────────
+  /admin/audit-log:
+    get:
+      tags: [Admin]
+      summary: Audit log
+      responses:
+        '200': { description: Audit entries }
+
+  /admin/metrics:
+    get:
+      tags: [Admin]
+      summary: System metrics
+      responses:
+        '200': { description: Metrics }
+
+  /logs-stream:
+    get:
+      tags: [Admin]
+      summary: Live log stream (SSE)
+      description: |
+        Server-Sent Events stream. Authenticate with a short-lived `?ticket=<ticket>` created via the authenticated ticket endpoint because
+        browser EventSource cannot set the Authorization header. Query-string
+        authentication is accepted only for this endpoint.
+      parameters:
+        - name: token
+          in: query
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: SSE stream
+          content:
+            text/event-stream:
+              schema:
+                type: string
+
+  /admin/list-models:
+    get:
+      tags: [Admin]
+      summary: List available Gemini models
+      responses:
+        '200': { description: Models }
+
+  /admin/broadcast:
+    post:
+      tags: [Admin]
+      summary: Broadcast message to SSE log clients
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                message: { type: string }
+      responses:
+        '200': { description: Broadcast sent }
+
+  # ── Platform ──────────────────────────────────────────────────────────────
+  /platform/whoami:
+    get:
+      tags: [Platform]
+      summary: Platform admin identity check
+      description: Requires email in PLATFORM_ADMIN_EMAILS env var.
+      responses:
+        '200': { description: Identity }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /platform/organizations:
+    get:
+      tags: [Platform]
+      summary: List all organizations
+      responses:
+        '200': { description: All orgs }
+
+  /platform/organizations/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string }
+    get:
+      tags: [Platform]
+      summary: Get organization
+      responses:
+        '200': { description: Org }
+
+  /platform/users:
+    get:
+      tags: [Platform]
+      summary: List all users
+      responses:
+        '200': { description: All users }
+
+  /platform/billing:
+    get:
+      tags: [Platform]
+      summary: Billing overview across all orgs
+      responses:
+        '200': { description: Billing data }
+    put:
+      tags: [Platform]
+      summary: Update billing config
+      requestBody:
+        content:
+          application/json:
+            schema: { type: object }
+      responses:
+        '200': { description: Updated }
+
+  /platform/pricing:
+    get:
+      tags: [Platform]
+      summary: Get pricing config
+      responses:
+        '200': { description: Pricing }
+    put:
+      tags: [Platform]
+      summary: Update pricing config
+      requestBody:
+        content:
+          application/json:
+            schema: { type: object }
+      responses:
+        '200': { description: Updated }
+
+  /platform/features:
+    get:
+      tags: [Platform]
+      summary: List feature flags
+      responses:
+        '200': { description: Features }
+
+  /platform/features/{key}:
+    put:
+      tags: [Platform]
+      summary: Set feature flag
+      parameters:
+        - name: key
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                enabled: { type: boolean }
+      responses:
+        '200': { description: Updated }
+
+  # ── Custom Objects ────────────────────────────────────────────────────────
+  /objects:
+    get:
+      tags: [Objects]
+      summary: List object schemas for this org
+      responses:
+        '200': { description: Object schemas }
+    post:
+      tags: [Objects]
+      summary: Create a custom object schema
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                key:    { type: string }
+                label:  { type: string }
+                fields: { type: array, items: { type: object } }
+      responses:
+        '201': { description: Created }
+
+  /objects/{key}:
+    parameters:
+      - name: key
+        in: path
+        required: true
+        schema: { type: string }
+    get:
+      tags: [Objects]
+      summary: Get object schema
+      responses:
+        '200': { description: Schema }
+    patch:
+      tags: [Objects]
+      summary: Update object schema
+      responses:
+        '200': { description: Updated }
+    delete:
+      tags: [Objects]
+      summary: Delete object schema
+      responses:
+        '200': { description: Deleted }
+
+  /objects/{key}/records:
+    parameters:
+      - name: key
+        in: path
+        required: true
+        schema: { type: string }
+    get:
+      tags: [Objects]
+      summary: List records for a custom object
+      responses:
+        '200': { description: Records }
+    post:
+      tags: [Objects]
+      summary: Create record
+      requestBody:
+        content:
+          application/json:
+            schema: { type: object }
+      responses:
+        '201': { description: Created }
+
+  /objects/{key}/records/{id}:
+    parameters:
+      - name: key
+        in: path
+        required: true
+        schema: { type: string }
+      - name: id
+        in: path
+        required: true
+        schema: { type: string }
+    patch:
+      tags: [Objects]
+      summary: Update record
+      responses:
+        '200': { description: Updated }
+    delete:
+      tags: [Objects]
+      summary: Delete record
+      responses:
+        '200': { description: Deleted }

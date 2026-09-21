@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+set -euo pipefail
+ENV="prod"
+ARGS=()
+for arg in "$@"; do
+  case "$arg" in
+    --dev) ENV=dev;; --uat) ENV=uat;; --prod) ENV=prod;;
+    --down) exec ./remove.sh --"$ENV";;
+    --reset) exec ./remove.sh --"$ENV" --volumes;;
+    --logs) exec ./logs.sh --"$ENV";;
+    --build) ARGS+=(--build);;
+    -d|--detach) :;;
+    *) echo "Unknown option: $arg"; exit 1;;
+  esac
+done
+exec ./deploy.sh --"$ENV" "${ARGS[@]}"

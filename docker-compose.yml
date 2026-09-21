@@ -1,0 +1,134 @@
+# Production deployment stack
+#
+# External services:
+#   - AWS S3
+#   - AWS Cognito
+#   - Google Vertex AI
+#
+# VM-local containers:
+#   - Express API
+#   - Scheduler process
+#   - MySQL
+#   - Redis
+#   - ChromaDB
+#   - Caddy
+
+services:
+  app:
+    build: .
+    restart: unless-stopped
+    env_file:
+      - path: .env
+        required: true
+    environment:
+      NODE_ENV: ${NODE_ENV:-production}
+      PORT: 3000
+      DB_ADAPTER: mysql
+      MYSQL_HOST: mysql
+      MYSQL_PORT: 3306
+      QUEUE_PROVIDER: ${QUEUE_PROVIDER:-memory}
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_URL: redis://redis:6379
+      CHROMA_URL: http://chroma-db:8000
+    ports:
+      - "3000:3000"
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      chroma-db:
+        condition: service_started
+    networks: [internal]
+
+  scheduler:
+    build: .
+    restart: unless-stopped
+    command: ["node", "scheduler.js"]
+    env_file:
+      - path: .env
+        required: true
+    environment:
+      NODE_ENV: ${NODE_ENV:-production}
+      SCHEDULER_PROVIDER: ${SCHEDULER_PROVIDER:-local}
+      QUEUE_PROVIDER: ${QUEUE_PROVIDER:-memory}
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_URL: redis://redis:6379
+      CHROMA_URL: http://chroma-db:8000
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks: [internal]
+
+  mysql:
+    image: mysql:8.4
+    restart: unless-stopped
+    environment:
+      MYSQL_DATABASE: ${MYSQL_DATABASE}
+      MYSQL_USER: ${MYSQL_USER}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+    volumes:
+      - mysql_data:/var/lib/mysql
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "mysqladmin ping -h localhost -u root -p$${MYSQL_ROOT_PASSWORD} --silent"
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    networks: [internal]
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks: [internal]
+
+  chroma-db:
+    image: chromadb/chroma:latest
+    restart: unless-stopped
+    volumes:
+      - chroma_data:/chroma/chroma
+    networks: [internal]
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    environment:
+      DOMAIN: ${DOMAIN:-localhost}
+    depends_on:
+      - app
+    networks: [internal]
+
+networks:
+  internal:
+    driver: bridge
+
+volumes:
+  mysql_data:
+  redis_data:
+  chroma_data:
+  caddy_data:
+  caddy_config:

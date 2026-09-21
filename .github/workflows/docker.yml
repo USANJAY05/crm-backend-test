@@ -1,0 +1,152 @@
+name: Build and Push Docker Image
+
+on:
+  push:
+    branches:
+      - 'feature/**'
+      - 'bugfix/**'
+      - 'breaking/**'
+  pull_request:
+    types: [closed]
+    branches:
+      - dev
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  # ────────────────────────────────────────────────
+  # Preview build on feature/* and bugfix/* branches
+  # ────────────────────────────────────────────────
+  preview:
+    name: Preview Image
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Derive branch slug
+        id: slug
+        run: |
+          # e.g. feature/user-auth  →  feature-user-auth
+          SLUG=$(echo "${{ github.ref_name }}" | sed 's|/|-|g' | tr '[:upper:]' '[:lower:]')
+          SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-7)
+          echo "tag=${SLUG}-${SHORT_SHA}" >> $GITHUB_OUTPUT
+
+      - name: Build and push preview image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.slug.outputs.tag }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # ────────────────────────────────────────────────
+  # Release build when a PR is merged into main
+  # ────────────────────────────────────────────────
+  release:
+    name: Release Image
+    if: github.event_name == 'pull_request' && github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # needed to push the new git tag
+      packages: write
+
+    steps:
+      - name: Checkout (full history for tags)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Compute next semantic version
+        id: semver
+        run: |
+          # Latest semver tag (default to v0.0.0 if none exist)
+          LATEST=$(git tag --list 'v[0-9]*' --sort=-version:refname | head -n1)
+          LATEST=${LATEST:-v0.0.0}
+          echo "Latest tag: $LATEST"
+
+          # Strip leading 'v'
+          VERSION=${LATEST#v}
+          MAJOR=$(echo "$VERSION" | cut -d. -f1)
+          MINOR=$(echo "$VERSION" | cut -d. -f2)
+          PATCH=$(echo "$VERSION" | cut -d. -f3)
+
+          # Determine bump type from source branch name
+          SOURCE_BRANCH="${{ github.event.pull_request.head.ref }}"
+          echo "Source branch: $SOURCE_BRANCH"
+
+          if [[ "$SOURCE_BRANCH" == breaking/* ]]; then
+            MAJOR=$((MAJOR + 1))
+            MINOR=0
+            PATCH=0
+            BUMP="major"
+          elif [[ "$SOURCE_BRANCH" == feature/* ]]; then
+            MINOR=$((MINOR + 1))
+            PATCH=0
+            BUMP="minor"
+          else
+            # bugfix/*, hotfix/*, or anything else → patch bump
+            PATCH=$((PATCH + 1))
+            BUMP="patch"
+          fi
+
+          NEW_VERSION="${MAJOR}.${MINOR}.${PATCH}"
+          echo "Bump type : $BUMP"
+          echo "New version: v${NEW_VERSION}"
+
+          echo "version=${NEW_VERSION}"        >> $GITHUB_OUTPUT
+          echo "tag=v${NEW_VERSION}"           >> $GITHUB_OUTPUT
+          echo "major_minor=${MAJOR}.${MINOR}" >> $GITHUB_OUTPUT
+          echo "major=${MAJOR}"                >> $GITHUB_OUTPUT
+
+      - name: Create and push git tag
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag ${{ steps.semver.outputs.tag }} -m "Release ${{ steps.semver.outputs.tag }}"
+          git push origin ${{ steps.semver.outputs.tag }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push release image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.semver.outputs.version }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.semver.outputs.major_minor }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.semver.outputs.major }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+          labels: |
+            org.opencontainers.image.version=${{ steps.semver.outputs.version }}
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

@@ -1,0 +1,64 @@
+# Caddyfile.uat — UAT reverse proxy (HTTPS via Let's Encrypt)
+# Caddy auto-provisions a TLS cert for $DOMAIN on first start.
+# Requires port 80 + 443 open and $DOMAIN pointing at this VM.
+{
+    admin off
+}
+
+{$DOMAIN} {
+    encode gzip
+
+    # ── Public endpoints ──────────────────────────────────────────────────────
+    handle /health {
+        reverse_proxy app:3000
+    }
+
+    handle /docs* {
+        reverse_proxy app:3000
+    }
+
+    handle /api/auth/login-url* {
+        reverse_proxy app:3000
+    }
+
+    handle /api/auth/industries* {
+        reverse_proxy app:3000
+    }
+
+    # SSE log stream
+    handle /api/logs-stream* {
+        reverse_proxy app:3000
+    }
+
+    # ── WebSocket endpoints (telephony streams) ───────────────────────────────
+    handle /session* {
+        reverse_proxy app:3000
+    }
+
+    handle /vobiz* {
+        reverse_proxy app:3000
+    }
+
+    handle /twilio* {
+        reverse_proxy app:3000
+    }
+
+    handle /telecmi* {
+        reverse_proxy app:3000
+    }
+
+    handle /piopiy* {
+        reverse_proxy app:3000
+    }
+
+    # ── All other routes ──────────────────────────────────────────────────────
+    handle {
+        reverse_proxy app:3000
+    }
+
+    log {
+        output stdout
+        format console
+        level  INFO
+    }
+}

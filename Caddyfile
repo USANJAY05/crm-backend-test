@@ -1,0 +1,40 @@
+# Caddyfile — ChiefVoice reverse proxy
+#
+# Behaviour depends on env vars:
+#   DOMAIN set     → Caddy serves that hostname with automatic HTTPS (ACME)
+#   DOMAIN not set → falls back to plain HTTP on ports 80 / 8081
+#
+# Set in .env or docker-compose environment:
+#   DOMAIN      e.g. app.example.com
+#   AUTH_DOMAIN e.g. auth.example.com
+
+{
+    admin off
+}
+
+# ── Main app ──────────────────────────────────────────────────────────────────
+{$DOMAIN:localhost:80} {
+    # Call recording playback — MinIO is internal-only (http://minio:9000),
+    # so browsers can't reach it directly. Proxy /media/* here and rewrite
+    # to the bucket's internal path. Set STORAGE_PUBLIC_URL to
+    # https://<this domain>/media so uploaded recording URLs point back
+    # through this route instead of the unreachable internal hostname.
+    route /media/* {
+        uri strip_prefix /media
+        rewrite * /{$STORAGE_BUCKET:recordings}{uri}
+        reverse_proxy minio:9000
+    }
+
+    reverse_proxy app:3000 {
+        header_up X-Forwarded-Proto {scheme}
+        header_up X-Real-IP {remote_host}
+    }
+}
+
+# ── Keycloak ──────────────────────────────────────────────────────────────────
+{$AUTH_DOMAIN:localhost:8081} {
+    reverse_proxy keycloak:8080 {
+        header_up X-Forwarded-Proto {scheme}
+        header_up X-Forwarded-Host {host}
+    }
+}

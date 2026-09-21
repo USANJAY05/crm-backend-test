@@ -1,0 +1,173 @@
+// Organization-specific persistence boundary.
+// Keep organization/GCP metadata access out of the large legacy repository.
+const supabase = require("../client");
+const crypto = require("crypto");
+const { encryptJson } = require("../../security/channelCredentials");
+
+const { pool } = require("../pool");
+
+const CORE_FIELDS = {
+  name: "name", workspaceName: "workspace_name", industry: "industry",
+  subscriptionPlan: "subscription_plan", aiMinutesUsed: "ai_minutes_used",
+  aiMinutesLimit: "ai_minutes_limit", phoneCharges: "phone_charges",
+  billingPeriodEnd: "billing_period_end", status: "status",
+  featureFlags: "feature_flags", createdAt: "created_at"
+};
+
+function toApi(row) {
+  if (!row) return row;
+  const api = { id: row.id, ...(row.settings || {}) };
+  for (const [apiKey, dbKey] of Object.entries(CORE_FIELDS)) {
+    if (row[dbKey] !== undefined && row[dbKey] !== null) api[apiKey] = row[dbKey];
+  }
+  return api;
+}
+
+function split(apiObj) {
+  const row = {};
+  const settings = {};
+  for (const [key, value] of Object.entries(apiObj || {})) {
+    if (key === "id") continue;
+    if (CORE_FIELDS[key]) row[CORE_FIELDS[key]] = value;
+    else settings[key] = value;
+  }
+  return { row, settings };
+}
+
+async function createOrganizationSetup({
+  name, workspaceName, industry, subscriptionPlan, featureFlags, adminEmail, adminName, gcpProject, callProvider,
+}) {
+  const client = await pool.connect(); const orgId = crypto.randomUUID();
+  const cloudProjectId = `orgcloud_${orgId}_vertex_ai`; const memberId = adminEmail ? crypto.randomUUID() : null; const now = new Date().toISOString();
+  try {
+    await client.query("BEGIN");
+    await client.query(`INSERT INTO organizations (id,name,workspace_name,industry,subscription_plan,feature_flags,created_at) VALUES ($1,$2,$3,$4,$5,$6,$7)`, [orgId,name,workspaceName,industry||"lending",subscriptionPlan||"Starter",JSON.stringify(featureFlags||[]),now]);
+    await client.query(`INSERT INTO organization_cloud_projects (id,organization_id,organization_name,provider,purpose,mode,project_id,project_number,location,credentials_encrypted,status,updated_at) VALUES ($1,$2,$3,'gcp','vertex-ai','existing',$4,$5,$6,$7,'ready',$8)`, [cloudProjectId,orgId,name,gcpProject.projectId,gcpProject.projectNumber||null,gcpProject.location||null,gcpProject.credentialsEncrypted||null,now]);
+    if (callProvider) {
+      await client.query(`INSERT INTO channels (id,org_id,type,external_id,config,credentials_encrypted,status,created_at) VALUES ($1,$2,$3,$4,$5,$6,'connected',$7) ON DUPLICATE KEY UPDATE external_id=VALUES(external_id),config=VALUES(config),credentials_encrypted=VALUES(credentials_encrypted),status=VALUES(status)`, [crypto.randomUUID(),orgId,callProvider.provider,callProvider.phoneNumber,JSON.stringify({phoneNumber:callProvider.phoneNumber}),encryptJson({authId:callProvider.authId,authToken:callProvider.authToken}),now]);
+    }
+    if (adminEmail) await client.query(`INSERT INTO org_members (id,org_id,user_id,email,name,role,feature_flags,created_at) VALUES ($1,$2,NULL,$3,$4,'Organization Admin',$5,$6)`, [memberId,orgId,adminEmail.toLowerCase(),adminName||adminEmail,JSON.stringify(featureFlags||[]),now]);
+    await client.query("COMMIT");
+    const orgResult=await client.query(`SELECT * FROM organizations WHERE id = $1`,[orgId]); const cloudResult=await client.query(`SELECT * FROM organization_cloud_projects WHERE id = $1`,[cloudProjectId]);
+    return {org:toApi(orgResult.rows[0]),cloudProject:toApiCloudProject(cloudResult.rows[0]),memberId};
+  } catch(err){ try{await client.query("ROLLBACK");}catch(_){} throw err; } finally{client.release();}
+}
+
+async function create({ name, workspaceName, industry, subscriptionPlan, featureFlags }) {
+  const { data, error } = await supabase.from("organizations").insert({
+    name,
+    workspace_name: workspaceName,
+    industry: industry || "lending",
+    subscription_plan: subscriptionPlan || "Starter",
+    feature_flags: featureFlags || []
+  }).select().single();
+  if (error) throw new Error(`[organizationRepository.create] ${error.message}`);
+  return toApi(data);
+}
+
+async function get(orgId) {
+  const { data, error } = await supabase.from("organizations").select("*").eq("id", orgId).maybeSingle();
+  if (error) throw new Error(`[organizationRepository.get] ${error.message}`);
+  return toApi(data);
+}
+
+async function update(orgId, patch) {
+  const existing = await get(orgId);
+  if (!existing) throw new Error("Organization not found");
+  const { row, settings } = split({ ...existing, ...patch });
+  const { data, error } = await supabase.from("organizations").update({ ...row, settings }).eq("id", orgId).select().single();
+  if (error) throw new Error(`[organizationRepository.update] ${error.message}`);
+  return toApi(data);
+}
+
+async function createCloudProjectRecord({ orgId, organizationName, status = "pending", mode = "automatic", projectId, projectNumber, location, credentialsEncrypted }) {
+  const id = `orgcloud_${orgId}_vertex_ai`;
+  const { data, error } = await supabase.from("organization_cloud_projects").upsert({
+    id,
+    organization_id: orgId,
+    organization_name: organizationName,
+    provider: "gcp",
+    purpose: "vertex-ai",
+    mode,
+    project_id: projectId || null,
+    project_number: projectNumber || null,
+    location: location || null,
+    credentials_encrypted: credentialsEncrypted || null,
+    status,
+    updated_at: new Date().toISOString()
+  }).select().single();
+  if (error) throw new Error(`[organizationRepository.createCloudProjectRecord] ${error.message}`);
+  return toApiCloudProject(data);
+}
+
+async function getCloudProject(orgId, provider = "gcp", purpose = "vertex-ai") {
+  const { data, error } = await supabase.from("organization_cloud_projects").select("*")
+    .eq("organization_id", orgId).eq("provider", provider).eq("purpose", purpose).maybeSingle();
+  if (error) throw new Error(`[organizationRepository.getCloudProject] ${error.message}`);
+  return toApiCloudProject(data || null);
+}
+
+async function getCloudProjectWithCredentials(orgId, provider = "gcp", purpose = "vertex-ai") {
+  const { data, error } = await supabase.from("organization_cloud_projects").select("*")
+    .eq("organization_id", orgId).eq("provider", provider).eq("purpose", purpose).maybeSingle();
+  if (error) throw new Error(`[organizationRepository.getCloudProjectWithCredentials] ${error.message}`);
+  return data || null;
+}
+
+function toApiCloudProject(row) {
+  if (!row) return null;
+  const { credentials_encrypted, ...safe } = row;
+  return safe;
+}
+
+async function updateCloudProject(orgId, patch, provider = "gcp", purpose = "vertex-ai") {
+  const existing = await getCloudProject(orgId, provider, purpose);
+  if (!existing) await createCloudProjectRecord({ orgId, organizationName: patch.organizationName || "Organization", status: patch.status || "pending" });
+  const values = { ...patch, updated_at: new Date().toISOString() };
+  if (values.organizationName !== undefined) { values.organization_name = values.organizationName; delete values.organizationName; }
+  if (values.projectId !== undefined) { values.project_id = values.projectId; delete values.projectId; }
+  if (values.projectNumber !== undefined) { values.project_number = values.projectNumber; delete values.projectNumber; }
+  if (values.billingAccount !== undefined) { values.billing_account = values.billingAccount; delete values.billingAccount; }
+  if (values.provisionedAt !== undefined) { values.provisioned_at = values.provisionedAt; delete values.provisionedAt; }
+  if (values.credentialsEncrypted !== undefined) { values.credentials_encrypted = values.credentialsEncrypted; delete values.credentialsEncrypted; }
+  const { data, error } = await supabase.from("organization_cloud_projects").update(values)
+    .eq("organization_id", orgId).eq("provider", provider).eq("purpose", purpose).select().single();
+  if (error) throw new Error(`[organizationRepository.updateCloudProject] ${error.message}`);
+  return toApiCloudProject(data);
+}
+
+async function listCloudProjectsByStatus(statuses = ["pending", "provisioning", "failed"]) {
+  const { data, error } = await supabase.from("organization_cloud_projects").select("*");
+  if (error) throw new Error(`[organizationRepository.listCloudProjectsByStatus] ${error.message}`);
+  const wanted = new Set(statuses);
+  return (data || []).filter(row => wanted.has(row.status)).map(toApiCloudProject);
+}
+
+async function markCloudProjectRetained(orgId, organizationName) {
+  const existing = await getCloudProject(orgId);
+  if (!existing) return null;
+  const { data, error } = await supabase.from("organization_cloud_projects").update({
+    status: "retained",
+    organization_name: organizationName || existing.organization_name,
+    retained_at: new Date().toISOString(),
+    updated_at: new Date().toISOString()
+  }).eq("id", existing.id).select().single();
+  if (error) throw new Error(`[organizationRepository.markCloudProjectRetained] ${error.message}`);
+  return data;
+}
+
+async function updateSystemAgentPrompt(orgId, agentId, prompt) {
+  const client = await pool.connect();
+  try {
+    const current = await client.query(`SELECT settings FROM organizations WHERE id = $1`, [orgId]);
+    if (!current.rows[0]) throw new Error("Organization not found");
+    const settings = current.rows[0].settings ? (typeof current.rows[0].settings === "string" ? JSON.parse(current.rows[0].settings) : current.rows[0].settings) : {};
+    settings.systemAgentPrompts = settings.systemAgentPrompts || {};
+    if (prompt == null) delete settings.systemAgentPrompts[agentId]; else settings.systemAgentPrompts[agentId] = String(prompt);
+    await client.query(`UPDATE organizations SET settings = $2 WHERE id = $1`, [orgId, JSON.stringify(settings)]);
+    const result = await client.query(`SELECT * FROM organizations WHERE id = $1`, [orgId]);
+    return toApi(result.rows[0]);
+  } finally { client.release(); }
+}
+
+module.exports = { CORE_FIELDS, create, createOrganizationSetup, get, update, toApi, createCloudProjectRecord, getCloudProject, getCloudProjectWithCredentials, toApiCloudProject, updateCloudProject, markCloudProjectRetained, listCloudProjectsByStatus, updateSystemAgentPrompt };

@@ -1,0 +1,21 @@
+# docker-compose.keycloak.dev.yml
+#
+# Dev override: runs Keycloak in start-dev mode (HTTP only, no TLS).
+# Merged on top of docker-compose.keycloak.yml by ./start --dev
+
+services:
+  keycloak:
+    command: >
+      start-dev
+      --db=mysql
+      --db-url=${KC_DB_URL:-jdbc:mysql://db:3306/keycloak}
+      --db-username=${KC_DB_USERNAME:-keycloak}
+      --db-password=${KC_DB_PASSWORD:-keycloak}
+      --hostname=${KC_HOSTNAME:-http://localhost:8081}
+      --hostname-strict=false
+      --http-port=8080
+      --import-realm
+
+
+    ports:
+      - "8081:8080"
