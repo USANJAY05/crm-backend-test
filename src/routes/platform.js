@@ -277,7 +277,7 @@ router.post("/organizations", async (req, res) => {
     }
 
     const orgFeatureFlags = Array.isArray(featureFlags) ? featureFlags : [];
-    const { org, cloudProject } = await db.createOrganizationSetup({
+    const { org, cloudProject, memberId } = await db.createOrganizationSetup({
       name, workspaceName, industry, subscriptionPlan,
       featureFlags: orgFeatureFlags,
       adminEmail, adminName,
@@ -295,9 +295,17 @@ router.post("/organizations", async (req, res) => {
       const normalizedEmail = adminEmail.toLowerCase();
       try {
         const generatedPassword = process.env.AUTH_PROVIDER === "identity_platform" ? null : crypto.randomBytes(8).toString("base64url");
-        const authUserId = await authProvider.provisionUser(normalizedEmail, generatedPassword, adminName || "", "org-admin");
-        if (authUserId === null) log.info(`ℹ️  Authentication provider did not create credentials for ${normalizedEmail}; user will authenticate through the configured provider`);
-        else tempPassword = generatedPassword;
+        const authUserId = await authProvider.provisionUser(normalizedEmail, generatedPassword, adminName || "", "Organization Admin");
+        if (!authUserId) {
+          if ((process.env.AUTH_PROVIDER || "cognito").toLowerCase() === "cognito") {
+            throw new Error("Cognito did not return a user id");
+          }
+          log.info(`ℹ️  Authentication provider deferred credential creation for ${normalizedEmail}`);
+        } else {
+          if (!memberId) throw new Error("Organization admin membership was not created");
+          await db.updateOrgMemberUserId(org.id, memberId, authUserId);
+          tempPassword = generatedPassword;
+        }
       } catch (provErr) {
         log.error("⚠️  Could not provision auth user:", provErr.message);
         tempPassword = null;

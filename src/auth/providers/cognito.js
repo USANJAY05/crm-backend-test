@@ -1,17 +1,31 @@
 // AWS Cognito authentication provider.
 // Required: COGNITO_USER_POOL_ID, COGNITO_REGION, COGNITO_CLIENT_ID.
-// The backend verifies Cognito JWTs and keeps CRM organization/role data in MySQL.
-// Admin user creation (AdminCreateUser/AdminSetUserPassword) additionally needs
-// IAM credentials with cognito-idp:AdminCreateUser, AdminSetUserPassword and
-// AdminUpdateUserAttributes on the pool — either the EC2/ECS instance role or
-// explicit AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY, same convention as
-// src/storage/client.js.
+//
+// Cognito is the identity source; CRM MySQL org_members remains the source of
+// truth for organization membership. Cognito groups mirror the CRM role so
+// tokens also carry a standard `cognito:groups` claim.
+//
+// Required IAM permissions for provisioning:
+//   cognito-idp:AdminCreateUser
+//   cognito-idp:AdminSetUserPassword
+//   cognito-idp:AdminGetUser
+//   cognito-idp:AdminAddUserToGroup
+//   cognito-idp:AdminListGroupsForUser
+//   cognito-idp:AdminRemoveUserFromGroup
+//   cognito-idp:AdminDeleteUser (only when explicitly deleting a member)
 const { CognitoJwtVerifier } = require('aws-jwt-verify');
 const {
   CognitoIdentityProviderClient,
   AdminCreateUserCommand,
   AdminSetUserPasswordCommand,
+  AdminGetUserCommand,
+  AdminAddUserToGroupCommand,
+  AdminListGroupsForUserCommand,
+  AdminRemoveUserFromGroupCommand,
+  AdminDeleteUserCommand,
+  CreateGroupCommand,
   UsernameExistsException,
+  GroupExistsException,
 } = require('@aws-sdk/client-cognito-identity-provider');
 const { getLogger } = require('../../observability/logger');
 const log = getLogger('auth.providers.cognito');
@@ -19,6 +33,17 @@ const log = getLogger('auth.providers.cognito');
 const REGION = process.env.COGNITO_REGION;
 const USER_POOL_ID = process.env.COGNITO_USER_POOL_ID;
 const CLIENT_ID = process.env.COGNITO_CLIENT_ID;
+
+// Super Admin is a platform role. Organization Admin and Team Member are
+// organization roles. Do not allow customer admins to create/assign Super Admin.
+const COGNITO_ROLES = Object.freeze({
+  SUPER_ADMIN: 'Super Admin',
+  ORGANIZATION_ADMIN: 'Organization Admin',
+  TEAM_MEMBER: 'Team Member',
+});
+
+const ROLE_GROUPS = Object.freeze(Object.values(COGNITO_ROLES));
+const ROLE_SET = new Set(ROLE_GROUPS);
 
 let idpClient;
 function getIdpClient() {
@@ -43,6 +68,7 @@ function getIdVerifier() {
   if (!idVerifier) idVerifier = CognitoJwtVerifier.create({ userPoolId: USER_POOL_ID, tokenUse: 'id', clientId: CLIENT_ID });
   return idVerifier;
 }
+
 async function verifyToken(token) {
   if (!token) throw new Error('Missing Cognito token');
   if (!REGION || !USER_POOL_ID || !CLIENT_ID) throw new Error('Cognito authentication is not configured');
@@ -53,42 +79,125 @@ async function verifyToken(token) {
     catch { throw accessErr; }
   }
 }
+
 function decodeToken(token) {
   try { return require('jsonwebtoken').decode(token); } catch { return null; }
 }
-async function provisionUser(email, password, name = '', role = '') {
+
+function normalizeRole(role) {
+  const value = String(role || COGNITO_ROLES.TEAM_MEMBER).trim();
+  if (!ROLE_SET.has(value)) throw new Error(`Invalid Cognito role "${value}"`);
+  return value;
+}
+
+async function ensureRoleGroups() {
   if (!REGION || !USER_POOL_ID) throw new Error('Cognito authentication is not configured');
   const client = getIdpClient();
 
-  let userId;
+  for (const groupName of ROLE_GROUPS) {
+    try {
+      await client.send(new CreateGroupCommand({
+        UserPoolId: USER_POOL_ID,
+        GroupName: groupName,
+        Description: `CRM role: ${groupName}`,
+      }));
+    } catch (err) {
+      if (!(err instanceof GroupExistsException) && err.name !== 'GroupExistsException') {
+        throw new Error(`Cognito role group "${groupName}" could not be ensured: ${err.message}`);
+      }
+    }
+  }
+}
+
+async function getUser(emailOrUsername) {
+  try {
+    return await getIdpClient().send(new AdminGetUserCommand({
+      UserPoolId: USER_POOL_ID,
+      Username: emailOrUsername,
+    }));
+  } catch (err) {
+    if (err.name === 'UserNotFoundException') return null;
+    throw err;
+  }
+}
+
+function getAttribute(user, name) {
+  return user?.UserAttributes?.find((a) => a.Name === name)?.Value || null;
+}
+
+async function syncUserRole(username, role) {
+  const targetRole = normalizeRole(role);
+  const client = getIdpClient();
+  await ensureRoleGroups();
+
+  const current = await client.send(new AdminListGroupsForUserCommand({
+    UserPoolId: USER_POOL_ID,
+    Username: username,
+  }));
+  const currentGroups = (current.Groups || []).map((g) => g.GroupName).filter(Boolean);
+
+  for (const groupName of ROLE_GROUPS) {
+    if (groupName !== targetRole && currentGroups.includes(groupName)) {
+      await client.send(new AdminRemoveUserFromGroupCommand({
+        UserPoolId: USER_POOL_ID,
+        Username: username,
+        GroupName: groupName,
+      }));
+    }
+  }
+
+  if (!currentGroups.includes(targetRole)) {
+    await client.send(new AdminAddUserToGroupCommand({
+      UserPoolId: USER_POOL_ID,
+      Username: username,
+      GroupName: targetRole,
+    }));
+  }
+
+  return targetRole;
+}
+
+async function provisionUser(email, password, name = '', role = COGNITO_ROLES.TEAM_MEMBER) {
+  if (!REGION || !USER_POOL_ID) throw new Error('Cognito authentication is not configured');
+  const normalizedEmail = String(email || '').trim().toLowerCase();
+  if (!normalizedEmail) throw new Error('Email is required for Cognito provisioning');
+
+  const targetRole = normalizeRole(role);
+  const client = getIdpClient();
+
+  await ensureRoleGroups();
+
+  let user;
   try {
     const createRes = await client.send(new AdminCreateUserCommand({
       UserPoolId: USER_POOL_ID,
-      Username: email,
+      Username: normalizedEmail,
       UserAttributes: [
-        { Name: 'email', Value: email },
+        { Name: 'email', Value: normalizedEmail },
         { Name: 'email_verified', Value: 'true' },
         ...(name ? [{ Name: 'name', Value: name }] : []),
-        ...(role ? [{ Name: 'custom:role', Value: role }] : []),
       ],
-      // We send our own welcome email with the temp password below —
-      // don't let Cognito also send its default invite.
       MessageAction: 'SUPPRESS',
     }));
-    userId = createRes.User?.Username;
+    user = createRes.User;
   } catch (err) {
-    if (err instanceof UsernameExistsException) return null; // already exists
-    throw new Error(`Cognito user creation failed: ${err.message}`);
+    if (err instanceof UsernameExistsException || err.name === 'UsernameExistsException') {
+      user = await getUser(normalizedEmail);
+    } else {
+      throw new Error(`Cognito user creation failed: ${err.message}`);
+    }
   }
-  if (!userId) throw new Error('Cognito user created but no username returned');
+
+  if (!user?.Username) throw new Error('Cognito user could not be resolved after provisioning');
+
+  const username = user.Username;
 
   if (password) {
     try {
       await client.send(new AdminSetUserPasswordCommand({
         UserPoolId: USER_POOL_ID,
-        Username: email,
+        Username: username,
         Password: password,
-        // Requires the user to set a new password on first sign-in.
         Permanent: false,
       }));
     } catch (err) {
@@ -96,6 +205,41 @@ async function provisionUser(email, password, name = '', role = '') {
     }
   }
 
+  await syncUserRole(username, targetRole);
+
+  const resolved = await getUser(username);
+  const userId = getAttribute(resolved, 'sub') || getAttribute(user, 'sub');
+  if (!userId) throw new Error('Cognito user was created but its immutable sub was not returned');
+
+  log.info('✅ Cognito user provisioned', {
+    userId,
+    email: normalizedEmail,
+    role: targetRole,
+  });
+
   return userId;
 }
-module.exports = { verifyToken, decodeToken, provisionUser };
+
+async function deleteUser(username) {
+  if (!REGION || !USER_POOL_ID) throw new Error('Cognito authentication is not configured');
+  try {
+    await getIdpClient().send(new AdminDeleteUserCommand({
+      UserPoolId: USER_POOL_ID,
+      Username: username,
+    }));
+    return true;
+  } catch (err) {
+    if (err.name === 'UserNotFoundException') return true;
+    throw new Error(`Cognito user deletion failed: ${err.message}`);
+  }
+}
+
+module.exports = {
+  verifyToken,
+  decodeToken,
+  provisionUser,
+  syncUserRole,
+  deleteUser,
+  ensureRoleGroups,
+  COGNITO_ROLES,
+};

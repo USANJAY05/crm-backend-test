@@ -792,6 +792,19 @@ async function incrementPhoneCharges(orgId, seconds) {
 // beyond the generic list/create/patch/remove above
 // ------------------------------------------------------------
 
+async function updateOrgMemberUserId(orgId, memberId, userId) {
+  if (!userId) throw new Error("[db.updateOrgMemberUserId] userId is required");
+  const { data, error } = await supabase
+    .from("org_members")
+    .update({ user_id: userId })
+    .eq("org_id", orgId)
+    .eq("id", memberId)
+    .select()
+    .single();
+  if (error) throw new Error(`[db.updateOrgMemberUserId] ${error.message}`);
+  return fromDbRow("team", data);
+}
+
 async function addOrgMember(orgId, userId, { name, email, phone, role, feature_flags } = {}) {
   const normalizedEmail = email ? email.toLowerCase() : email;
   const { data, error } = await supabase

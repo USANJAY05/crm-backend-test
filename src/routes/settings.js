@@ -94,46 +94,90 @@ router.get("/team", requireAuth, async (req, res) => {
   catch (err) { res.status(500).json({ error: safeErrorMessage(err) }); }
 });
 
-router.post("/team", requireAuth, requireRole(ADMIN_ROLES), async (req, res) => {
+router.post("/team", requireAuth, requireRole(["Organization Admin"]), async (req, res) => {
   try {
-    const { featureFlags, ...memberFields } = req.body;
-    const m = await db.addOrgMember(req.orgId, null, { ...memberFields, feature_flags: featureFlags || [] });
+    const { featureFlags, role, ...memberFields } = req.body || {};
 
-    // Dev Keycloak provisions credentials. Production Identity Platform users
-    // authenticate through the configured Identity Platform provider (for
-    // example Google), so no temporary password is generated or emailed.
-    let credsSent = false;
-    if (m.email) {
-      const tempPassword = process.env.AUTH_PROVIDER === "identity_platform" ? null : crypto.randomBytes(8).toString("base64url");
+    // Customer organization admins can create team members only. Platform-level
+    // roles are never assignable from an organization-scoped endpoint.
+    if (role && role !== "Team Member") {
+      return res.status(400).json({ error: "Organization admins can only add Team Member accounts." });
+    }
+    if (!memberFields.email) {
+      return res.status(400).json({ error: "email is required" });
+    }
+
+    const m = await db.addOrgMember(req.orgId, null, {
+      ...memberFields,
+      role: "Team Member",
+      feature_flags: Array.isArray(featureFlags) ? featureFlags : [],
+    });
+
+    if ((process.env.AUTH_PROVIDER || "cognito").toLowerCase() === "cognito") {
       try {
-        const authUserId = await authProvider.provisionUser(m.email, tempPassword, m.name || "", m.role || "");
-        if (authUserId === null) {
-          log.info(`ℹ️  Authentication provider did not create credentials for ${m.email}; user will authenticate through the configured provider`);
-        } else {
-          const org = await db.getOrg(req.orgId);
-          const orgName = org?.name || "your organization";
-          const tpl = emailTemplates.welcomeEmail({
-            orgName,
-            adminEmail: m.email,
-            tempPassword,
-            role: m.role,
-          });
-          mailer.sendMail({ to: m.email, ...tpl })
-            .catch((err) => log.error("⚠️  Welcome email failed:", err.message));
-          credsSent = true;
-        }
+        const tempPassword = crypto.randomBytes(8).toString("base64url");
+        const authUserId = await authProvider.provisionUser(
+          m.email,
+          tempPassword,
+          m.name || "",
+          "Team Member"
+        );
+
+        if (!authUserId) throw new Error("Cognito did not return a user id");
+        await db.updateOrgMemberUserId(req.orgId, m.id, authUserId);
+
+        const org = await db.getOrg(req.orgId);
+        const tpl = emailTemplates.welcomeEmail({
+          orgName: org?.name || "your organization",
+          adminEmail: m.email,
+          tempPassword,
+          role: "Team Member",
+        });
+        mailer.sendMail({ to: m.email, ...tpl })
+          .catch((err) => log.error("⚠️  Welcome email failed:", err.message));
+
+        global.broadcastLog(`👤 Registered team member: ${m.name}`, { type: "settings" });
+        auditLog.record(req.orgId, req, "team.add", "team_member", m.id, {
+          name: m.name,
+          role: "Team Member",
+          authUserId,
+        });
+        return res.status(201).json({ ...m, userId: authUserId, role: "Team Member", credsSent: true });
       } catch (authErr) {
-        log.error("⚠️  Authentication provider provisioning failed:", authErr.message);
+        // Do not leave an org member record that cannot authenticate.
+        await db.remove("team", req.orgId, m.id).catch((cleanupErr) =>
+          log.error("⚠️  Failed to clean up member after Cognito provisioning failure:", cleanupErr.message)
+        );
+        log.error("⚠️  Cognito team-member provisioning failed:", authErr.message);
+        return res.status(502).json({
+          error: "Team member could not be provisioned in Cognito.",
+          detail: authErr.message,
+        });
       }
     }
 
+    // Preserve the provider-agnostic behavior for non-Cognito deployments.
+    const authUserId = await authProvider.provisionUser(
+      m.email,
+      null,
+      m.name || "",
+      "Team Member"
+    ).catch((authErr) => {
+      log.warn(`⚠️  Authentication provider provisioning deferred for ${m.email}: ${authErr.message}`);
+      return null;
+    });
+    if (authUserId) await db.updateOrgMemberUserId(req.orgId, m.id, authUserId);
+
     global.broadcastLog(`👤 Registered team member: ${m.name}`, { type: "settings" });
-    auditLog.record(req.orgId, req, "team.add", "team_member", m.id, { name: m.name, role: m.role });
-    res.status(201).json({ ...m, credsSent });
-  } catch (err) { res.status(500).json({ error: safeErrorMessage(err) }); }
+    auditLog.record(req.orgId, req, "team.add", "team_member", m.id, { name: m.name, role: "Team Member", authUserId });
+    res.status(201).json({ ...m, userId: authUserId, role: "Team Member", credsSent: false });
+  } catch (err) {
+    const status = err?.code === "ER_DUP_ENTRY" || err?.code === "23505" ? 409 : 500;
+    res.status(status).json({ error: safeErrorMessage(err) });
+  }
 });
 
-router.patch("/team/:id/flags", requireAuth, requireRole(ADMIN_ROLES), async (req, res) => {
+router.patch("/team/:id/flags", requireAuth, requireRole(["Organization Admin"]), async (req, res) => {
   try {
     const { featureFlags } = req.body;
     if (!Array.isArray(featureFlags)) return res.status(400).json({ error: "featureFlags must be an array" });
@@ -144,16 +188,27 @@ router.patch("/team/:id/flags", requireAuth, requireRole(ADMIN_ROLES), async (re
   } catch (err) { res.status(500).json({ error: safeErrorMessage(err) }); }
 });
 
-router.patch("/team/:id", requireAuth, requireRole(ADMIN_ROLES), async (req, res) => {
+router.patch("/team/:id", requireAuth, requireRole(["Organization Admin"]), async (req, res) => {
   try {
-    const updated = await db.patch("team", req.orgId, req.params.id, req.body);
-    if (!updated) return res.status(404).json({ error: "Team member not found" });
-    auditLog.record(req.orgId, req, "team.update", "team_member", req.params.id, req.body);
+    const patch = { ...(req.body || {}) };
+    if (patch.role && patch.role !== "Team Member") {
+      return res.status(400).json({ error: "Organization admins cannot assign platform or organization-admin roles." });
+    }
+    if (patch.userId) delete patch.userId;
+
+    const existing = await db.getTeamMemberById(req.orgId, req.params.id);
+    if (!existing) return res.status(404).json({ error: "Team member not found" });
+
+    const updated = await db.patch("team", req.orgId, req.params.id, patch);
+    if (patch.role && existing.userId && (process.env.AUTH_PROVIDER || "cognito").toLowerCase() === "cognito") {
+      await authProvider.syncUserRole(existing.userId, "Team Member");
+    }
+    auditLog.record(req.orgId, req, "team.update", "team_member", req.params.id, patch);
     res.json(updated);
   } catch (err) { res.status(500).json({ error: safeErrorMessage(err) }); }
 });
 
-router.delete("/team/:id", requireAuth, requireRole(ADMIN_ROLES), async (req, res) => {
+router.delete("/team/:id", requireAuth, requireRole(["Organization Admin"]), async (req, res) => {
   try {
     await db.remove("team", req.orgId, req.params.id);
     auditLog.record(req.orgId, req, "team.remove", "team_member", req.params.id, {});
@@ -161,7 +216,7 @@ router.delete("/team/:id", requireAuth, requireRole(ADMIN_ROLES), async (req, re
   } catch (err) { res.status(500).json({ error: safeErrorMessage(err) }); }
 });
 
-router.post("/team/sync", requireAuth, requireRole(ADMIN_ROLES), async (req, res) => {
+router.post("/team/sync", requireAuth, requireRole(["Organization Admin"]), async (req, res) => {
   try { res.json(await db.replaceTeamMembers(req.orgId, req.body)); }
   catch (err) { res.status(500).json({ error: safeErrorMessage(err) }); }
 });
