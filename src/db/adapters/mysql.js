@@ -57,6 +57,7 @@ function parseSelectColumns(table, cols) {
   if (!cols || String(cols).trim() === "*") return "*";
   return String(cols).split(",").map(part => {
     const raw = part.trim();
+    if (raw === "*") return raw;
     // Relationship embeds are resolved in JS after the base query.
     const embed = raw.match(/^([A-Za-z_][A-Za-z0-9_]*)\(([^)]+)\)$/);
     if (embed) {
@@ -588,7 +589,10 @@ async function createTables() {
           const type = sqlType(declaredType, col, col === def.pk);
           await client.query(`ALTER TABLE ${table} MODIFY COLUMN ${col} ${type}${col === def.pk ? " PRIMARY KEY" : ""}`);
         } catch (err) {
-          if (err?.code !== "ER_DUP_FIELDNAME" && err?.code !== "ER_NO_SUCH_TABLE") throw err;
+          // ER_MULTIPLE_PRI_KEY: the column is already the table's primary
+          // key from a previous run — re-declaring it via MODIFY COLUMN is
+          // redundant, not a real schema conflict, so it's safe to ignore.
+          if (err?.code !== "ER_DUP_FIELDNAME" && err?.code !== "ER_NO_SUCH_TABLE" && err?.code !== "ER_MULTIPLE_PRI_KEY") throw err;
         }
       }
       if (def.columns.org_id) {
