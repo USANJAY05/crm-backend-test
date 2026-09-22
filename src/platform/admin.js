@@ -80,6 +80,31 @@ async function listUsers() {
 // actually writes to. The older "calls" table this used to query is
 // legacy/unused (always empty), which is why the admin panel's Calls page
 // showed nothing despite calls happening every day.
+async function listCalls(limit = 200) {
+  const { data, error } = await db.supabase
+    .from("call_logs")
+    .select("*, organizations(name)")
+    .order("created_at", { ascending: false })
+    .limit(limit);
+  if (error) throw new Error(`[platformAdmin.listCalls] ${error.message}`);
+  return (data || []).map((c) => ({
+    id: c.id,
+    orgId: c.org_id,
+    orgName: c.organizations?.name,
+    callerNumber: c.caller_number,
+    // call_logs has no agent reference (see lead_name comment above), so
+    // there's nothing accurate to put here — leaving it null is better
+    // than mislabeling the called party's name as the agent's.
+    agentName: null,
+    durationSeconds: c.duration,
+    sentiment: c.sentiment,
+    recordingUrl: c.recording_url,
+    summary: c.summary,
+    transcript: c.transcript,
+    createdAt: c.created_at
+  }));
+}
+
 async function listAuditLog(limit = 200) {
   const { data, error } = await db.supabase
     .from("audit_log")
@@ -338,7 +363,7 @@ async function listCostArchive() {
 }
 
 module.exports = {
-  listOrganizations, listUsers, listAuditLog, getStats, getTimeSeries, getOrganizationDetail,
+  listOrganizations, listUsers, listCalls, listAuditLog, getStats, getTimeSeries, getOrganizationDetail,
   getPricing, updatePricing, getFeatureFlags, updateFeatureFlag, deleteOrganization,
   listCostProviders, upsertCostProvider, listCostArchive,
 };

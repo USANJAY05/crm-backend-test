@@ -128,6 +128,14 @@ router.get("/users", async (req, res) => {
   }
 });
 
+router.get("/calls", async (req, res) => {
+  try {
+    res.json(await platformAdmin.listCalls());
+  } catch (err) {
+    handleError(err, res);
+  }
+});
+
 router.get("/audit-log", async (req, res) => {
   try {
     res.json(await platformAdmin.listAuditLog());
