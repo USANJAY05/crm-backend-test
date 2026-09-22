@@ -422,6 +422,36 @@ router.delete("/organizations/:id/numbers/:numberId", async (req, res) => {
   } catch (err) { handleError(err, res); }
 });
 
+router.post("/organizations/:id/suspend", async (req, res) => {
+  try {
+    const { id } = req.params;
+    const org = await db.getOrg(id);
+    if (!org) return res.status(404).json({ error: "Organization not found" });
+
+    const updated = await db.updateOrg(id, { status: "Suspended" });
+    const actor = { userId: req.userId, userEmail: req.userEmail };
+    await auditLog.record(id, actor, "platform.org.suspend", "organization", id, { name: org.name });
+    res.json(updated);
+  } catch (err) {
+    handleError(err, res);
+  }
+});
+
+router.post("/organizations/:id/reactivate", async (req, res) => {
+  try {
+    const { id } = req.params;
+    const org = await db.getOrg(id);
+    if (!org) return res.status(404).json({ error: "Organization not found" });
+
+    const updated = await db.updateOrg(id, { status: "Active" });
+    const actor = { userId: req.userId, userEmail: req.userEmail };
+    await auditLog.record(id, actor, "platform.org.reactivate", "organization", id, { name: org.name });
+    res.json(updated);
+  } catch (err) {
+    handleError(err, res);
+  }
+});
+
 router.delete("/organizations/:id", async (req, res) => {
   try {
     const { id } = req.params;
