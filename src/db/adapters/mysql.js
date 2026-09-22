@@ -547,6 +547,15 @@ const VARCHAR_COLUMNS = new Map([
   ["current_lead_id", "VARCHAR(191)"],
   ["current_provider_call_sid", "VARCHAR(255)"],
   ["provider_call_sid", "VARCHAR(255)"],
+  // Indexed columns: MySQL cannot put a BLOB/TEXT column in a key without a
+  // prefix length, so every column referenced by a CREATE INDEX below must
+  // resolve to a bounded type instead of the LONGTEXT default.
+  ["created_at", "VARCHAR(64)"],
+  ["next_retry_at", "VARCHAR(64)"],
+  ["next_dial_at", "VARCHAR(64)"],
+  ["last_message_at", "VARCHAR(64)"],
+  ["conversation_id", "VARCHAR(191)"],
+  ["stage_id", "VARCHAR(191)"],
 ]);
 
 function sqlType(t, col = "", isPk = false) {
