@@ -1664,7 +1664,7 @@ async function deleteOrganizationData(orgId, archiveSnapshot = null, deletedByEm
       "objects", "org_members", "ai_session_usage", "audit_log",
     ];
 
-    const [rows] = await client.query(
+    const { rows } = await client.query(
       `SELECT DISTINCT TABLE_NAME AS table_name
          FROM information_schema.COLUMNS
         WHERE TABLE_SCHEMA = DATABASE()
