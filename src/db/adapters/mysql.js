@@ -556,6 +556,7 @@ const VARCHAR_COLUMNS = new Map([
   ["last_message_at", "VARCHAR(64)"],
   ["conversation_id", "VARCHAR(191)"],
   ["stage_id", "VARCHAR(191)"],
+  ["started_at", "VARCHAR(64)"],
 ]);
 
 function sqlType(t, col = "", isPk = false) {
@@ -677,7 +678,7 @@ async function createTables() {
       ["idx_enquiries_org_status_created", "enquiries", ["org_id", "status", "created_at"]],
       ["idx_messages_conversation_created", "messages", ["conversation_id", "created_at"]],
       ["idx_conversations_org_last_message", "conversations", ["org_id", "last_message_at"]],
-      ["idx_workflow_runs_org_status_created", "workflow_runs", ["org_id", "status", "created_at"]],
+      ["idx_workflow_runs_org_status_created", "workflow_runs", ["org_id", "status", "started_at"]],
       ["idx_knowledge_documents_org_created", "knowledge_documents", ["org_id", "created_at"]],
       ["idx_knowledge_chunks_document_index", "knowledge_chunks", ["document_id", "chunk_index"]],
       ["idx_dnc_entries_org_phone", "dnc_entries", ["org_id", "phone"]],
