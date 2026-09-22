@@ -37,9 +37,9 @@ const CLIENT_ID = process.env.COGNITO_CLIENT_ID;
 // Super Admin is a platform role. Organization Admin and Team Member are
 // organization roles. Do not allow customer admins to create/assign Super Admin.
 const COGNITO_ROLES = Object.freeze({
-  SUPER_ADMIN: 'Super Admin',
-  ORGANIZATION_ADMIN: 'Organization Admin',
-  TEAM_MEMBER: 'Team Member',
+  SUPER_ADMIN: 'SuperAdmin',
+  ORGANIZATION_ADMIN: 'OrganizationAdmin',
+  TEAM_MEMBER: 'TeamMember',
 });
 
 const ROLE_GROUPS = Object.freeze(Object.values(COGNITO_ROLES));

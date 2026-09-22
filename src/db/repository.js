@@ -1767,6 +1767,7 @@ module.exports = {
   computeRetryFields,
   MAX_RETRY_ATTEMPTS,
   addOrgMember,
+  updateOrgMemberUserId,
   findOrgIdForUser,
   findMembershipForUser,
   findOrgIdForNumber,

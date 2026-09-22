@@ -326,11 +326,6 @@ async function deleteOrganization(orgId, actor) {
     aiTotalTokens: snapshot.aiTokenUsage?.totalTokens ?? 0,
   });
 
-  // Delete the tenant atomically. A partial delete must never leave an
-  // organization with some data removed and other data still present.
-  // The repository also discovers tenant tables from the actual MySQL schema,
-  // so newly-added org-scoped tables are not silently forgotten here.
-  await db.deleteOrganizationData(orgId);
 }
 
 async function listCostArchive() {
