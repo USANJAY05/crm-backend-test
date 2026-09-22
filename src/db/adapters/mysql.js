@@ -45,13 +45,18 @@ function assertIdentifier(value, label = "identifier") {
   if (!IDENTIFIER_RE.test(name)) throw new Error(`[mysqlClient] Invalid ${label}: ${name}`);
   return name;
 }
+// Backtick-quote an already-validated identifier so schema columns that
+// collide with MySQL reserved words (e.g. "key") remain valid unquoted-looking
+// SQL. Safe because the name has already passed IDENTIFIER_RE, which admits
+// no backtick or other special character.
+function q(name) { return "`" + name + "`"; }
 function assertColumn(table, column) {
   const col = assertIdentifier(column, "column");
   const def = TABLES[table];
   if (!def || !Object.prototype.hasOwnProperty.call(def.columns, col)) {
     throw new Error(`[mysqlClient] Unknown column "${col}" for table "${table}"`);
   }
-  return col;
+  return q(col);
 }
 function parseSelectColumns(table, cols) {
   if (!cols || String(cols).trim() === "*") return "*";
@@ -567,11 +572,11 @@ async function createTables() {
   try {
     for (const [table, def] of Object.entries(TABLES)) {
       const cols = Object.entries(def.columns)
-        .map(([col, type]) => `${col} ${sqlType(type, col, col === def.pk)}${col === def.pk ? " PRIMARY KEY" : ""}`)
+        .map(([col, type]) => `${q(col)} ${sqlType(type, col, col === def.pk)}${col === def.pk ? " PRIMARY KEY" : ""}`)
         .join(", ");
       await client.query(`CREATE TABLE IF NOT EXISTS ${table} (${cols})`);
       for (const [col, type] of Object.entries(def.columns)) {
-        try { await client.query(`ALTER TABLE ${table} ADD COLUMN ${col} ${sqlType(type, col, col === def.pk)}`); } catch (err) {
+        try { await client.query(`ALTER TABLE ${table} ADD COLUMN ${q(col)} ${sqlType(type, col, col === def.pk)}`); } catch (err) {
           // The column may already exist. Ignore only that expected case;
           // surface real schema errors so startup cannot silently continue
           // with a partially migrated database.
@@ -587,7 +592,7 @@ async function createTables() {
       for (const [col, declaredType] of Object.entries(def.columns)) {
         try {
           const type = sqlType(declaredType, col, col === def.pk);
-          await client.query(`ALTER TABLE ${table} MODIFY COLUMN ${col} ${type}${col === def.pk ? " PRIMARY KEY" : ""}`);
+          await client.query(`ALTER TABLE ${table} MODIFY COLUMN ${q(col)} ${type}${col === def.pk ? " PRIMARY KEY" : ""}`);
         } catch (err) {
           // ER_MULTIPLE_PRI_KEY: the column is already the table's primary
           // key from a previous run — re-declaring it via MODIFY COLUMN is
@@ -953,13 +958,13 @@ class QueryBuilder {
       const rows=Array.isArray(this.payload)?this.payload:[this.payload]; const inserted=[];
       for (const apiRow of rows) { const row={...apiRow}; if (!row.id) row.id=genId(); if ("created_at" in def.columns && row.created_at===undefined) row.created_at=nowIso(); if ("updated_at" in def.columns && row.updated_at===undefined) row.updated_at=nowIso();
         const cols=Object.keys(row).filter(c=>c in def.columns); const values=cols.map(c=>serializeValue(def.columns[c],row[c]));
-        await pool.query(`INSERT INTO ${table} (${cols.join(",")}) VALUES (${cols.map(()=>"?").join(",")})`,values);
-        const r=await pool.query(`SELECT * FROM ${table} WHERE ${def.pk} = ?`,[row[def.pk]]); inserted.push(deserializeRow(table,r.rows[0]));
+        await pool.query(`INSERT INTO ${table} (${cols.map(q).join(",")}) VALUES (${cols.map(()=>"?").join(",")})`,values);
+        const r=await pool.query(`SELECT * FROM ${table} WHERE ${q(def.pk)} = ?`,[row[def.pk]]); inserted.push(deserializeRow(table,r.rows[0]));
       } return this._finishWrite(inserted,mode);
     }
     if (this.op === "update") {
       const patch={...this.payload}; const cols=Object.keys(patch).filter(c=>c in def.columns); const values=cols.map(c=>serializeValue(def.columns[c],patch[c])); const {where,params}=this._buildWhere();
-      if(cols.length) await pool.query(`UPDATE ${table} SET ${cols.map(c=>`${c} = ?`).join(",")} ${where}`,[...values,...params]);
+      if(cols.length) await pool.query(`UPDATE ${table} SET ${cols.map(c=>`${q(c)} = ?`).join(",")} ${where}`,[...values,...params]);
       const fresh=await pool.query(`SELECT * FROM ${table} ${where}`,params); return this._finishWrite(fresh.rows.map(r=>deserializeRow(table,r)),mode);
     }
     if (this.op === "upsert") {
@@ -972,9 +977,9 @@ class QueryBuilder {
       // performed SELECT -> UPDATE/INSERT, which could race under concurrent
       // requests.
       const updateCols=cols.length ? cols : [def.pk];
-      const updateSql=updateCols.map(c=>`${c} = VALUES(${c})`).join(",");
+      const updateSql=updateCols.map(c=>`${q(c)} = VALUES(${q(c)})`).join(",");
       await pool.query(
-        `INSERT INTO ${table} (${all.join(",")}) VALUES (${all.map(()=>"?").join(",")}) ON DUPLICATE KEY UPDATE ${updateSql}`,
+        `INSERT INTO ${table} (${all.map(q).join(",")}) VALUES (${all.map(()=>"?").join(",")}) ON DUPLICATE KEY UPDATE ${updateSql}`,
         values
       );
 
@@ -985,12 +990,12 @@ class QueryBuilder {
       const uniqueKeys=def.uniqueKeys || [[def.pk]];
       for (const keyCols of uniqueKeys) {
         if (!keyCols.every(c => row[c] !== undefined && row[c] !== null)) continue;
-        const clauses=keyCols.map(c=>`${c} = ?`).join(" AND ");
+        const clauses=keyCols.map(c=>`${q(c)} = ?`).join(" AND ");
         const result=await pool.query(`SELECT * FROM ${table} WHERE ${clauses} LIMIT 1`, keyCols.map(c=>serializeValue(def.columns[c],row[c])));
         if (result.rows[0]) { saved=result.rows[0]; break; }
       }
       if (!saved) {
-        const result=await pool.query(`SELECT * FROM ${table} WHERE ${def.pk} = ? LIMIT 1`,[row[def.pk]]);
+        const result=await pool.query(`SELECT * FROM ${table} WHERE ${q(def.pk)} = ? LIMIT 1`,[row[def.pk]]);
         saved=result.rows[0];
       }
       if (!saved) throw new Error(`Upsert succeeded but persisted ${table} row could not be located`);
