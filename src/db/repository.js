@@ -787,20 +787,6 @@ async function incrementPhoneCharges(orgId, seconds) {
   return rows[0] ? orgRowToApi(rows[0]) : null;
 }
 
-async function updateOrg(orgId, apiPatch) {
-  const existing = await getOrg(orgId);
-  const merged = { ...(existing || {}), ...apiPatch };
-  const { row, settings } = splitOrgApiObject(merged);
-  const { data, error } = await supabase
-    .from("organizations")
-    .update({ ...row, settings })
-    .eq("id", orgId)
-    .select()
-    .single();
-  if (error) throw new Error(`[db.updateOrg] ${error.message}`);
-  return orgRowToApi(data);
-}
-
 // ------------------------------------------------------------
 // Org membership (team) — signup / invite / lookup helpers
 // beyond the generic list/create/patch/remove above
