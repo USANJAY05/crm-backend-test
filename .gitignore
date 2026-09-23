@@ -9,4 +9,5 @@ secrets/
 .env.dev
 .env.uat
 .env.prod
+.env.production
 .DS_Store
