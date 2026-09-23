@@ -1173,7 +1173,7 @@ async function openGeminiSession(vobizWs, voiceName, systemPrompt, recordStream,
         data = JSON.stringify(payload);
         log.info("⚙️ Vobiz Stream: Intercepted setup payload, injected low-latency VAD, disabled thinking, and forced both transcriptions.");
         if (global.broadcastLog) {
-          const modelName = (genai.isVertex) ? "gemini-live-2.5-flash-native-audio" : "gemini-2.5-flash-native-audio-latest";
+          const modelName = "gemini-live-2.5-flash-native-audio";
           global.broadcastLog(`📤 [Gemini Send] setup (model: ${modelName}, voice: ${voiceName})`, { type: "gemini_raw" });
         }
       }
@@ -1189,7 +1189,7 @@ async function openGeminiSession(vobizWs, voiceName, systemPrompt, recordStream,
     featureFlags.isEnabled("ai_auto_hangup"),
   ]);
 
-  const modelName = (genai.isVertex) ? "gemini-live-2.5-flash-native-audio" : "gemini-2.5-flash-native-audio-latest";
+  const modelName = "gemini-live-2.5-flash-native-audio";
 
   // Usage/cost tracking (src/ai/geminiUsageTracker.js) — one row per
   // Gemini Live session. Started here, right before the connection this
