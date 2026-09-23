@@ -209,7 +209,14 @@ function createRabbitMqQueueAdapter() {
     return jobId;
   }
 
-  function process(type, handler, opts = {}) {
+  // Named registerProcessor, not process — a local function literally named
+  // `process` would be hoisted across this entire closure (including
+  // connect(), which reads process.env.RABBITMQ_URL), shadowing Node's
+  // global `process` for every function in this file and breaking every
+  // process.env.* read below this closure's start. The public queue
+  // interface still exposes this as `.process` (see the return statement)
+  // so callers are unaffected.
+  function registerProcessor(type, handler, opts = {}) {
     if (registrations.has(type)) throw new Error(`[queue] processor for "${type}" already registered`);
     const reg = {
       handler,
@@ -288,7 +295,7 @@ function createRabbitMqQueueAdapter() {
     return { deadLetterCount: null, deadLetters: [], queues: Object.fromEntries(Object.entries(queues)) };
   }
 
-  return { enqueue, process, start, stop, isReady, getStats };
+  return { enqueue, process: registerProcessor, start, stop, isReady, getStats };
 }
 
 module.exports = { createRabbitMqQueueAdapter };

@@ -3,21 +3,37 @@ describe("db.claimAutoDialLead", () => {
   const TASK_ID = "TASK-mucnil3o-ts4f3k";
   const CLIENT_LEAD_ID = "L-mucnil3o-ts4f3k"; // frontend/src/lib/ids.ts:newClientId shape — not a UUID
 
-  let mockConnection;
+  let connections;
+
+  // Requiring src/db/repository (via src/db/client) triggers
+  // src/db/adapters/mysql.js's createTables() in the background at
+  // require time — it opens its own single pool.connect() connection and
+  // runs many CREATE TABLE/ALTER TABLE queries on it, unrelated to
+  // anything this suite exercises. A shared mock connection object would
+  // let that unrelated traffic pollute this test's query-call
+  // assertions, so getConnection() here hands out a fresh, independent
+  // connection each call — claimAutoDialLead's own pool.connect() call
+  // gets one nobody else ever touches.
+  function mockMakeConnection() {
+    const conn = { query: jest.fn().mockResolvedValue([[], undefined]), release: jest.fn() };
+    connections.push(conn);
+    return conn;
+  }
+
+  function connectionFor(sqlFragment) {
+    return connections.find((c) => c.query.mock.calls.some(([sql]) => sql.includes(sqlFragment)));
+  }
 
   beforeEach(() => {
     jest.resetModules();
     process.env.MYSQL_URL = "mysql://test:test@localhost:3306/test";
     process.env.DB_ADAPTER = "mysql";
 
-    mockConnection = {
-      query: jest.fn().mockResolvedValue([[], undefined]),
-      release: jest.fn(),
-    };
+    connections = [];
     jest.mock("mysql2/promise", () => ({
       createPool: jest.fn(() => ({
         query: jest.fn().mockResolvedValue([[], undefined]),
-        getConnection: jest.fn().mockResolvedValue(mockConnection),
+        getConnection: jest.fn(() => Promise.resolve(mockMakeConnection())),
         end: jest.fn().mockResolvedValue(undefined),
         on: jest.fn(),
       })),
@@ -32,7 +48,7 @@ describe("db.claimAutoDialLead", () => {
     await expect(claimAutoDialLead(ORG_ID, TASK_ID, null)).rejects.toThrow(
       "[db.claimAutoDialLead] invalid lead id"
     );
-    expect(mockConnection.query).not.toHaveBeenCalled();
+    expect(connectionFor("UPDATE dialer_tasks")).toBeUndefined();
   });
 
   test("accepts a client-generated (non-UUID) lead id and scopes the claim to org_id", async () => {
@@ -44,24 +60,41 @@ describe("db.claimAutoDialLead", () => {
     const result = await claimAutoDialLead(ORG_ID, TASK_ID, CLIENT_LEAD_ID);
 
     expect(result).toBeNull();
-    expect(mockConnection.query).toHaveBeenCalledTimes(1);
-    const [sql, params] = mockConnection.query.mock.calls[0];
+    const conn = connectionFor("UPDATE dialer_tasks");
+    expect(conn).toBeDefined();
+    expect(conn.query).toHaveBeenCalledTimes(1);
+    // repository.js writes $1/$2/... placeholders; src/db/pool.js's
+    // normalizeSql() rewrites them to native '?' before mysql2 ever sees
+    // them, re-expanding each repeated placeholder positionally — org_id
+    // ($1) and leadId ($3) each appear more than once in this query, so
+    // the flattened params array repeats them accordingly.
+    const [sql, params] = conn.query.mock.calls[0];
     expect(sql).toContain("UPDATE dialer_tasks");
-    expect(params).toEqual([ORG_ID, TASK_ID, CLIENT_LEAD_ID, expect.any(String)]);
+    expect(sql).not.toContain("$1");
+    expect(sql).not.toContain("$3");
+    expect(params).toEqual([
+      CLIENT_LEAD_ID, // SET current_lead_id = $3
+      TASK_ID,        // WHERE id = $2
+      ORG_ID,         // AND org_id = $1
+      expect.any(String), // AND next_dial_at <= $4
+      CLIENT_LEAD_ID, // EXISTS ... l.id = $3
+      ORG_ID,         // AND l.org_id = $1
+      CLIENT_LEAD_ID, // JSON_QUOTE($3)
+    ]);
   });
 
-  test("builds the call_results JSON path with JSON_QUOTE($3), not raw string concatenation", async () => {
+  test("builds the call_results JSON path with JSON_QUOTE(?), not raw string concatenation", async () => {
     // Regression test for the "Invalid JSON path expression" failure a
     // hyphenated client-generated lead id (e.g. L-mucnil3o-ts4f3k) used to
-    // trigger: CONCAT('$.', $3, '.status') produces an unquoted JSON path
-    // member name, which MySQL's JSON path grammar rejects for any id
-    // containing '-'. JSON_QUOTE($3) wraps the id as a quoted member name
-    // instead, which is valid for any string id.
+    // trigger: CONCAT('$.', <leadId>, '.status') produces an unquoted
+    // JSON path member name, which MySQL's JSON path grammar rejects for
+    // any id containing '-'. JSON_QUOTE(...) wraps the id as a quoted
+    // member name instead, which is valid for any string id.
     const { claimAutoDialLead } = require("../src/db/repository");
     await claimAutoDialLead(ORG_ID, TASK_ID, CLIENT_LEAD_ID);
 
-    const [sql] = mockConnection.query.mock.calls[0];
-    expect(sql).toContain("CONCAT('$.', JSON_QUOTE($3), '.status')");
-    expect(sql).not.toContain("CONCAT('$.', $3, '.status')");
+    const [sql] = connectionFor("UPDATE dialer_tasks").query.mock.calls[0];
+    expect(sql).toContain("CONCAT('$.', JSON_QUOTE(?), '.status')");
+    expect(sql).not.toContain("CONCAT('$.', ?, '.status')");
   });
 });
