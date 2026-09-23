@@ -29,7 +29,7 @@ const vobizProxy = require("./vobizProxy");
 const { getLogger } = require("../observability/logger");
 const log = getLogger("telephony.vobizPipeline");
 const {
-  vobizCallNumbers, vobizCallQuestions, vobizCallOrgs, vobizCallDirection,
+  vobizCallNumbers, vobizCallQuestions, vobizCallOrgs, vobizCallDirection, vobizPrewarmedClients,
   handleSearchPolicyKnowledgeBase, handleSaveQuestionResponse, handleSendEmailDocument,
   handleSendWhatsappMessage, handleSaveEnquiry, extractContactAndTrigger, hangupVobizCall, processPostCallData,
   resample24To16, appendCallLog,
@@ -243,18 +243,52 @@ async function handleVobizSession(vobizWs, streamContext = null) {
           getCallerNumber = () => resolvedPhone || "Vobiz Call";
 
           resolvedOrgId = authorizedOrgId;
-          aiClient = await genai.getClientForOrg(resolvedOrgId);
+
+          const startupStartTime = Date.now();
+
+          // Outbound auto-dial calls know the org while the phone is ringing.
+          // Reuse the Vertex client warmed by triggerVobizOutboundCall instead
+          // of resolving the project + decrypting credentials after answer.
+          const prewarmedClientPromise = vobizPrewarmedClients.get(callId);
+          vobizPrewarmedClients.delete(callId);
+          const clientPromise = prewarmedClientPromise || genai.getClientForOrg(resolvedOrgId);
+
+          // These lookups are independent. Start them together immediately
+          // while the tenant client is being resolved.
           let orgHasKnowledgeBase = false;
-          if (resolvedOrgId) {
-            try { customObjects = await objectsEngine.listObjects(resolvedOrgId); }
-            catch (err) { log.error("❌ [pipeline] Failed to load custom objects:", err.message); }
-            try {
-              activeConfig = await getConfigForOrg(resolvedOrgId);
-              voiceName = VOICE_MAP[activeConfig.activeVoice] || voiceName;
-            } catch (err) { log.error("❌ [pipeline] Failed to load org config:", err.message); }
-            try { orgHasKnowledgeBase = await knowledgeBase.hasContent(resolvedOrgId); }
-            catch (err) { log.error("❌ [pipeline] Failed to check knowledge base:", err.message); }
-          }
+          const customObjectsPromise = objectsEngine.listObjects(resolvedOrgId).catch((err) => {
+            log.error("❌ [pipeline] Failed to load custom objects:", err.message);
+            return [];
+          });
+          const configPromise = getConfigForOrg(resolvedOrgId).catch((err) => {
+            log.error("❌ [pipeline] Failed to load org config:", err.message);
+            return activeConfig;
+          });
+          const knowledgeBasePromise = knowledgeBase.hasContent(resolvedOrgId).catch((err) => {
+            log.error("❌ [pipeline] Failed to check knowledge base:", err.message);
+            return false;
+          });
+          const questionsPromise = db.getQuestions(resolvedOrgId).catch((err) => {
+            log.error("❌ [pipeline] Failed to load org questionnaire, using generic defaults:", err.message);
+            return genericFallbackQuestions;
+          });
+
+          // STT does not depend on the business prompt. Once the client is
+          // available, start its WebSocket handshake immediately; the DB/KB
+          // lookups above are already running in parallel.
+          aiClient = await clientPromise;
+          if (!aiClient) aiClient = await genai.getClientForOrg(resolvedOrgId);
+          log.info(`⏱️ [pipeline] Answer -> tenant Gemini client ready: ${Date.now() - startupStartTime}ms`);
+          const sttReadyPromise = openSttSession();
+
+          [customObjects, activeConfig, orgHasKnowledgeBase] = await Promise.all([
+            customObjectsPromise,
+            configPromise,
+            knowledgeBasePromise,
+          ]);
+          const questionsList = await questionsPromise;
+          voiceName = VOICE_MAP[activeConfig.activeVoice] || voiceName;
+          log.info(`⏱️ [pipeline] Answer -> business setup ready: ${Date.now() - startupStartTime}ms`);
 
           const { functionDeclarations: customToolDeclarations, promptSection: customObjectsPrompt } = buildCustomObjectTools(customObjects);
           let knowledgeBasePrompt = "";
@@ -270,12 +304,6 @@ KNOWLEDGE BASE
 ──────────
 If the caller asks anything about this business, its products, services, pricing, or policies, call the 'search_knowledge_base' tool with their question to get the exact facts before answering. Do not make up or guess details — use the retrieved text to explain. Keep the spoken answer short — one or two sentences, the direct answer only, not a full lecture. Long explanations add real delay before you start speaking; the caller can always ask a follow-up if they want more.
 `;
-          }
-
-          let questionsList = genericFallbackQuestions;
-          if (resolvedOrgId) {
-            try { questionsList = await db.getQuestions(resolvedOrgId); }
-            catch (err) { log.error("❌ [pipeline] Failed to load org questionnaire, using generic defaults:", err.message); }
           }
 
           let activeQuestions = questionsList;
@@ -330,9 +358,19 @@ TEXT OUTPUT → SPOKEN AUDIO
 ──────────
 You are a text model, but everything you write here gets read aloud verbatim by a TTS voice — there is no separate "written mode". Apply the speech style, contractions, and disfluency rules above to every reply exactly as if you were speaking them, not writing a message. Never produce complete formal written sentences, bullet points, or lists — write the words the way you'd actually say them out loud, including the contracted/softened forms. Keep each reply to 1-2 short spoken sentences.`;
 
-          await openSttSession();
-          sessionReady = true;
-          sessionReadyResolve();
+          // The greeting also does not depend on STT being ready. Start TTS as
+          // soon as the prompt/config is available, while the STT WebSocket
+          // finishes its handshake in parallel. The caller hears the greeting
+          // as soon as TTS produces its first audio instead of waiting for the
+          // entire startup chain.
+          sttReadyPromise.then(() => {
+            sessionReady = true;
+            sessionReadyResolve();
+          }).catch((err) => {
+            log.error("❌ [pipeline] STT startup error:", err.message);
+            sessionReady = true;
+            sessionReadyResolve();
+          });
 
           // Fixed warm greeting, synthesized directly (no LLM round-trip needed
           // for a scripted opening line) — mirrors the audio-to-audio engine's
@@ -342,7 +380,9 @@ You are a text model, but everything you write here gets read aloud verbatim by 
           history.push({ role: "model", parts: [{ text: greetingText }] });
           transcriptLines.push({ role: "ai", text: greetingText });
           if (global.broadcastLog) global.broadcastLog(`🤖 Agent: "${greetingText}"`, { type: "transcript", role: "ai", text: greetingText });
-          synthesizeAndSend(greetingText, generation).catch(err => log.error("❌ [pipeline] Greeting TTS error:", err.message));
+          synthesizeAndSend(greetingText, generation, () => {
+            log.info(`⏱️ [pipeline] Answer -> first greeting audio: ${Date.now() - startupStartTime}ms`);
+          }).catch(err => log.error("❌ [pipeline] Greeting TTS error:", err.message));
 
           break;
         }

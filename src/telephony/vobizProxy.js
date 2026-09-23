@@ -261,6 +261,11 @@ const vobizCallAgentId = new Map();
 // still-correct behavior) when nothing was pre-warmed — e.g. inbound calls,
 // which can't be pre-warmed since the org isn't known until the call rings.
 const vobizPrewarmedSetup = new Map();
+// Outbound calls know the organization before the callee answers. Warm the
+// tenant-scoped GoogleGenAI client during ringing so answer-time startup does
+// not spend the first part of the caller's conversation resolving project
+// credentials and constructing the Vertex client.
+const vobizPrewarmedClients = new Map();
 setInterval(() => {
   // Belt-and-suspenders cleanup in case a call's own TTL cleanup (set where
   // each entry is created) never runs — mirrors the 30-minute horizon used
@@ -503,6 +508,13 @@ async function triggerVobizOutboundCall(orgId, phoneNumber, { questions, from, l
   // known at this point; only failures here are swallowed (falls back to the
   // normal post-answer lookup path) so a pre-warm problem can never break the
   // call itself.
+  const prewarmedClientPromise = genai.getClientForOrg(orgId).catch((err) => {
+    log.error("❌ Vobiz Google AI client pre-warm failed, will retry post-answer:", err.message);
+    return null;
+  });
+  vobizPrewarmedClients.set(callSid, prewarmedClientPromise);
+  setTimeout(() => vobizPrewarmedClients.delete(callSid), 1800000);
+
   const prewarmPromise = resolveVobizCallSetup(orgId, phoneNumber, null, "outbound", agentId || null, undefined)
     .catch((err) => {
       log.error("❌ Vobiz pre-warm lookup failed, will retry post-answer:", err.message);
@@ -2358,7 +2370,7 @@ async function extractContactAndTrigger(
 }
 
 module.exports = {
-  handleVobizSession, vobizCallNumbers, vobizCallCallee, vobizCallQuestions, vobizCallTaskConfig, vobizCallOrgs, vobizCallDirection, vobizCallUuidToInternalId, vobizMachineDetectedCalls, vobizCallAttemptNumber, vobizCallRetryContext, vobizCallFinalizers, triggerVobizOutboundCall,
+  handleVobizSession, vobizCallNumbers, vobizCallCallee, vobizCallQuestions, vobizCallTaskConfig, vobizCallOrgs, vobizCallDirection, vobizCallUuidToInternalId, vobizMachineDetectedCalls, vobizCallAttemptNumber, vobizCallRetryContext, vobizCallFinalizers, triggerVobizOutboundCall, vobizPrewarmedClients,
   // Exported additionally so services/vobizPipeline.js (STT->LLM->TTS engine)
   // can reuse the exact same tool-call handlers, post-call processing, and
   // audio helpers instead of duplicating them and risking drift.
