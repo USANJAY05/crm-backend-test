@@ -81,12 +81,14 @@ const GET_STARHEALTH_QUOTE_TOOL = {
 const callLogDir = path.join(__dirname, "../../temp/call_logs_raw");
 if (!fs.existsSync(callLogDir)) fs.mkdirSync(callLogDir, { recursive: true });
 function appendCallLog(callId, entry) {
-  try {
-    const line = JSON.stringify({ ts: new Date().toISOString(), ...entry }) + "\n";
-    fs.appendFileSync(path.join(callLogDir, `${callId}.jsonl`), line);
-  } catch (err) {
-    log.error("❌ Call log write error:", err.message);
-  }
+  // Never do synchronous filesystem I/O on the live-media event loop.
+  // The old appendFileSync() ran for every Gemini frame and could block the
+  // same Node thread that owns the 20ms Vobiz audio pacer, producing the
+  // observed 3-10s outbound-audio gaps even while the queue still contained
+  // audio. Keep the raw diagnostic log, but write it asynchronously.
+  const line = JSON.stringify({ ts: new Date().toISOString(), ...entry }) + "\n";
+  fs.promises.appendFile(path.join(callLogDir, `${callId}.jsonl`), line)
+    .catch((err) => log.error("❌ Call log write error:", err.message));
 }
 
 // ── Clients ───────────────────────────────────────────────────
@@ -973,7 +975,11 @@ If the tool result has 'deferred: true', tell the caller their personalized quot
               connectGemini(lastResumptionHandle);
             },
             kbDocumentIds,
-            normalizedQuestions
+            normalizedQuestions,
+            {
+              prewarmedGeminiClientPromise,
+              prewarmedFeatureFlagsPromise,
+            }
           ).then(session => {
             log.info(`✅ Gemini Live session open for Vobiz | Call ID: ${generatedCallId}`);
             if (global.broadcastLog) {
@@ -1165,6 +1171,7 @@ If the tool result has 'deferred: true', tell the caller their personalized quot
 // ──────────═════════════════════
 async function openGeminiSession(vobizWs, voiceName, systemPrompt, recordStream, transcriptLines, callId, getStreamId, onTokenUsage, onAudioOut, onSetupComplete, getCallerNumber, customToolDeclarations = [], orgId = null, customObjects = [], getVobizCallId = null, resumeHandle = null, onResumptionHandle, onDisconnect, kbDocumentIds = null, normalizedQuestions = [], prewarmedDeps = null) {
   let loggedSampleServerContent = 0; // diagnostic-only counter, see onmessage below
+  let lastRawBroadcastAt = 0;
 
   // Contact capture state (used when Gemini doesn't fire a toolCall) — was
   // previously declared in handleVobizSession, a sibling function with no
@@ -1335,8 +1342,18 @@ async function openGeminiSession(vobizWs, voiceName, systemPrompt, recordStream,
     featureFlags.isEnabled("ai_auto_hangup"),
   ]);
   const geminiClientPromise = prewarmedDeps?.prewarmedGeminiClientPromise || genai.getClientForOrg(orgId);
+  const [featureFlagResult, geminiClientResult] = await Promise.all([
+    Promise.resolve(featureFlagPromise).then((value) => value || Promise.all([
+      featureFlags.isEnabled("knowledge_base_search"),
+      featureFlags.isEnabled("email_documents"),
+      featureFlags.isEnabled("whatsapp_channel"),
+      featureFlags.isEnabled("ai_auto_hangup"),
+    ])),
+    Promise.resolve(geminiClientPromise).then((value) => value || genai.getClientForOrg(orgId)),
+  ]);
   const [vobizKbEnabled, vobizEmailEnabled, vobizWhatsappEnabled, vobizAutoHangupEnabled] =
-    await featureFlagPromise;
+    featureFlagResult;
+  const geminiClient = geminiClientResult;
 
   const modelName = "gemini-live-2.5-flash-native-audio";
 
@@ -1357,7 +1374,7 @@ async function openGeminiSession(vobizWs, voiceName, systemPrompt, recordStream,
   // parallel. Neither operation depends on the other, so awaiting them
   // sequentially only adds their latencies to the critical path before the
   // Gemini Live socket can be opened.
-  const [usageHandle, geminiClient] = await Promise.all([
+  const [usageHandle] = await Promise.all([
     geminiUsageTracker.startUsageSession({
       orgId,
       callId,
@@ -1365,7 +1382,6 @@ async function openGeminiSession(vobizWs, voiceName, systemPrompt, recordStream,
       provider: "vobiz",
       model: modelName,
     }),
-    geminiClientPromise,
   ]);
 
   const geminiConnectStartedAt = Date.now();
@@ -1747,8 +1763,18 @@ async function openGeminiSession(vobizWs, voiceName, systemPrompt, recordStream,
                 fillerPlaying = false;
               }
 
-              // 2. Push to pacing queue and start playing at a constant rate (avoids jitter and breaking)
+              // 2. Push to pacing queue and start playing at a constant rate.
+              // Keep a small bounded latency budget. If Gemini outruns the
+              // telephony leg for several seconds, retaining every old frame
+              // makes the caller hear stale speech long after the model has
+              // moved on. Prefer a fresh response over an ever-growing queue.
+              const MAX_OUTBOUND_QUEUE_BYTES = 96_000; // 3s at 16kHz PCM16
               outboundQueue = outboundQueue.length ? Buffer.concat([outboundQueue, pcm16k]) : pcm16k;
+              if (outboundQueue.length > MAX_OUTBOUND_QUEUE_BYTES) {
+                outboundQueue = outboundQueue.subarray(outboundQueue.length - MAX_OUTBOUND_QUEUE_BYTES);
+                hasPrebuffered = true;
+                log.warn(`⚠️ Vobiz audio queue capped [${callId}] at ${MAX_OUTBOUND_QUEUE_BYTES}B to prevent stale AI audio`);
+              }
               startPacing();
 
               // Save to recording file
@@ -1762,6 +1788,21 @@ async function openGeminiSession(vobizWs, voiceName, systemPrompt, recordStream,
           const text = response.serverContent.inputTranscription.text;
           lastCallerSpeechAt = Date.now();
           awaitingFirstAgentChunk = true;
+
+          // Do not wait for Gemini's separate `interrupted` event to stop
+          // stale model audio. The transcript is already proof that the
+          // caller has started a new turn. Clearing immediately prevents
+          // queued AI speech from being played back over the caller and also
+          // prevents old audio from surfacing seconds later after a queue
+          // stall.
+          if (outboundQueue.length > 0 || fillerPlaying) {
+            if (fillerTimer) { clearTimeout(fillerTimer); fillerTimer = null; }
+            fillerPlaying = false;
+            stopPacing();
+            sendJson(vobizWs, { event: "clearAudio", streamId: getStreamId() });
+            log.debug(`🛑 Vobiz audio cleared on caller speech [${callId}]`);
+          }
+
           log.info(`👤 Vobiz Caller: "${text}"`);
 
           // Debounced instant-reply filler — reset on every fragment so it
@@ -1856,10 +1897,19 @@ async function openGeminiSession(vobizWs, voiceName, systemPrompt, recordStream,
     session.conn.ws.on("message", (rawFrame) => {
       try {
         const payload = JSON.parse(rawFrame.toString());
-        if (global.broadcastLog) {
+        const usage = payload.usageMetadata || payload.serverContent?.usageMetadata || payload.usage_metadata || payload.serverContent?.usage_metadata;
+
+        // Raw Gemini frames are useful for diagnostics, but broadcasting every
+        // 20-50ms frame to the dashboard is not part of the call path. Under
+        // concurrent calls it creates avoidable JSON/stringification and
+        // WebSocket work on the same Node event loop as the Vobiz media pacer.
+        // Throttle only the human-readable raw feed; usage is still processed
+        // on every frame.
+        const now = Date.now();
+        const shouldBroadcastRaw = Boolean(global.broadcastLog) && (now - lastRawBroadcastAt >= 250);
+        if (shouldBroadcastRaw) {
+          lastRawBroadcastAt = now;
           let eventSummary = "📥 [Gemini Receive] ";
-          const usage = payload.usageMetadata || payload.serverContent?.usageMetadata || payload.usage_metadata || payload.serverContent?.usage_metadata;
-          
           if (payload.serverContent?.modelTurn?.parts) {
             const hasAudio = payload.serverContent.modelTurn.parts.some(p => p.inlineData?.mimeType?.startsWith("audio/"));
             eventSummary += `serverContent (modelTurn${hasAudio ? ' with audio payload' : ''})`;
@@ -1874,25 +1924,21 @@ async function openGeminiSession(vobizWs, voiceName, systemPrompt, recordStream,
           } else {
             eventSummary += Object.keys(payload).join(", ");
           }
-          
           global.broadcastLog(eventSummary, { type: "gemini_raw" });
-          
-          // Count and log tokens robustly as a separate event if usageMetadata is present
-          if (usage) {
-            const inCount = usage.promptTokenCount || usage.prompt_token_count || 0;
-            const outCount = usage.responseTokenCount || usage.response_token_count || 
-                             usage.candidatesTokenCount || usage.candidates_token_count || 0;
-            if (inCount > 0 || outCount > 0) {
+        }
+
+        // Count usage on every frame. This path is intentionally independent
+        // of the diagnostic broadcast throttle above.
+        if (usage) {
+          const inCount = usage.promptTokenCount || usage.prompt_token_count || 0;
+          const outCount = usage.responseTokenCount || usage.response_token_count ||
+                           usage.candidatesTokenCount || usage.candidates_token_count || 0;
+          if (inCount > 0 || outCount > 0) {
+            if (global.broadcastLog) {
               global.broadcastLog(`📥 [Gemini Receive] usageMetadata (promptTokens: ${inCount}, responseTokens: ${outCount})`, { type: "gemini_raw" });
-              onTokenUsage(inCount, outCount);
-              // Dedicated usage-tracking path — separate from onTokenUsage
-              // above (which feeds this call's own cost-logging, unchanged).
-              // recordUsage treats inCount/outCount as the session's
-              // cumulative total-so-far and keeps only the max seen, so
-              // this is safe to call on every event without double-counting
-              // regardless of how many usageMetadata frames arrive.
-              geminiUsageTracker.recordUsage(usageHandle, { inputTokens: inCount, outputTokens: outCount }).catch(() => {});
             }
+            onTokenUsage(inCount, outCount);
+            geminiUsageTracker.recordUsage(usageHandle, { inputTokens: inCount, outputTokens: outCount }).catch(() => {});
           }
         }
       } catch (err) {

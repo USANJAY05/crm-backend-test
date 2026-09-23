@@ -73,12 +73,16 @@ router.post("/incoming", requireVobizWebhook, async (req, res) => {
   // no-answer/AMD checks that could each miss a case the others don't
   // cover.
   if (req.body.Event === "Hangup" && CallUUID) {
+    // finalizeCall() cleans the in-memory org/call caches, so capture the
+    // org before awaiting it. Otherwise the authoritative Vobiz duration
+    // correction below sees no org and silently never updates call_logs.
+    const hangupOrgId = vobizCallOrgs.get(CallUUID) || null;
     vobizCallFinalizers.finalize(CallUUID)
       .then((finalized) => {
         if (finalized) return; // finalizeCall() already handled this call for real
         if (!vobizCallOrgs.has(CallUUID)) return; // not one of ours, or its cache entry already expired
 
-        const orgId = vobizCallOrgs.get(CallUUID);
+        const orgId = hangupOrgId;
         const calleeNumber = vobizCallCallee.get(CallUUID) || To;
         const attemptNumber = vobizCallAttemptNumber.get(CallUUID) || 1;
         const retryContext = vobizCallRetryContext.get(CallUUID) || null;
@@ -114,7 +118,7 @@ router.post("/incoming", requireVobizWebhook, async (req, res) => {
     const internalCallId = vobizCallUuidToInternalId.get(CallUUID);
     const realDuration = parseInt(req.body.Duration, 10);
     if (internalCallId && !Number.isNaN(realDuration)) {
-      const orgId = vobizCallOrgs.get(CallUUID);
+      const orgId = hangupOrgId;
       if (orgId) {
         db.patch("calllogs", orgId, internalCallId, { duration: realDuration })
           .then(() => log.info(`⏱️ Corrected call ${internalCallId} duration to ${realDuration}s`))

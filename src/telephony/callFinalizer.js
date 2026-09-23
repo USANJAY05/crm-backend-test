@@ -515,7 +515,22 @@ async function finalizeCallRecord({
           // to look up at all.
           answers: Object.fromEntries((callAnswers || []).map((a) => [a.label || a.question, a.answer])),
         };
-        await db.patch("dialertasks", orgId, retryContext.taskId, { callResults });
+        // A completed call must release the task's in-flight lease here, not
+        // only via the auto-dial poller. The poller discovers completion by
+        // looking up call_logs, so waiting for another poll creates a race
+        // where the UI/task can remain in "dialing" even though this call is
+        // already finalized. Clearing the provider SID also makes this
+        // idempotent: a later scheduler tick cannot treat the same call as
+        // still active and re-process it.
+        await db.patch("dialertasks", orgId, retryContext.taskId, {
+          callResults,
+          currentLeadId: null,
+          currentProviderCallSid: null,
+          currentProvider: null,
+          currentCallStartedAt: null,
+          autoDialStatus: task.autoDialEnabled ? "waiting" : "paused",
+          nextDialAt: new Date(Date.now() + 3000).toISOString(),
+        });
       }
     } catch (err) {
       log.error(`❌ [${provider}] Failed to update task ${retryContext.taskId} callResults for lead ${retryContext.leadId}:`, err.message);
