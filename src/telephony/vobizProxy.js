@@ -571,68 +571,89 @@ async function handleVobizSession(vobizWs, streamContext = null) {
           let kbMode = "all";
           let kbDocumentIds = null;
           let companyInfoPrompt = "";
+          let knowledgeBaseSearchEnabled = false;
+          let preloadedQuestions = genericFallbackQuestions;
+
+          // These lookups are independent of each other. Running them together
+          // removes the old waterfall where objects -> org -> caller -> agent
+          // config each had to finish before Gemini could even be opened.
+          // The call's prompt still waits for all required data, but the wall
+          // clock is now close to the slowest lookup instead of their sum.
           if (resolvedOrgId) {
-            try {
-              customObjects = await objectsEngine.listObjects(resolvedOrgId);
-            } catch (err) {
+            const lookupPhone = (vobizCallDirection.get(callId) || "inbound") === "outbound" ? calleeNumber : resolvedPhone;
+            const explicitAgentId = sanitizedCallee ? vobizCallAgentId.get(sanitizedCallee) : null;
+            if (explicitAgentId) vobizCallAgentId.delete(sanitizedCallee);
+
+            const customObjectsPromise = objectsEngine.listObjects(resolvedOrgId).catch((err) => {
               log.error("❌ Failed to load custom objects for Vobiz call org:", err.message);
-            }
-            try {
-              const org = await db.getOrg(resolvedOrgId);
-              companyInfoPrompt = buildCompanyInfoPrompt(org);
-              if (org?.name) orgName = org.name;
-            } catch (err) {
+              return [];
+            });
+            const orgPromise = db.getOrg(resolvedOrgId).catch((err) => {
               log.error("❌ Failed to load org profile for Vobiz call:", err.message);
-            }
-            // Recognize a caller who's already a saved contact — outbound
-            // calls look up the LEAD being called (calleeNumber), inbound
-            // calls look up the actual caller (resolvedPhone). Without
-            // this the AI re-asks "what's your name?" every single call,
-            // even for someone who's called five times already.
-            try {
-              const lookupPhone = (vobizCallDirection.get(callId) || "inbound") === "outbound" ? calleeNumber : resolvedPhone;
-              const leadMatch = lookupPhone ? await db.findLeadByPhone(resolvedOrgId, lookupPhone) : null;
-              const recordMatch = !leadMatch && lookupPhone ? await objectsEngine.findRecordByPhone(resolvedOrgId, lookupPhone) : null;
-              const knownName = leadMatch?.name || recordMatch?.name || null;
-              if (knownName) callerContactName = knownName;
-            } catch (err) {
+              return null;
+            });
+            const callerIdentityPromise = (async () => {
+              if (!lookupPhone) return null;
+              const leadMatch = await db.findLeadByPhone(resolvedOrgId, lookupPhone);
+              if (leadMatch?.name) return leadMatch.name;
+              const recordMatch = await objectsEngine.findRecordByPhone(resolvedOrgId, lookupPhone);
+              return recordMatch?.name || null;
+            })().catch((err) => {
               log.error("❌ Failed to look up caller identity for Vobiz call:", err.message);
+              return null;
+            });
+            const agentConfigPromise = (explicitAgentId
+              ? getAgentConfigById(explicitAgentId, resolvedOrgId)
+              : getAgentConfigForNumber(calleeNumber, resolvedOrgId)
+            ).catch((err) => {
+              log.error("❌ Failed to load agent config for Vobiz call, using default:", err.message);
+              return null;
+            });
+            const questionsPromise = db.getQuestions(resolvedOrgId).catch((err) => {
+              log.error("❌ Failed to load org questionnaire, using generic defaults:", err.message);
+              return genericFallbackQuestions;
+            });
+            const kbFeaturePromise = featureFlags.isEnabled("knowledge_base_search").catch(() => false);
+
+            const [loadedObjects, org, knownName, agentResult, loadedQuestions, kbFeatureEnabled] = await Promise.all([
+              customObjectsPromise,
+              orgPromise,
+              callerIdentityPromise,
+              agentConfigPromise,
+              questionsPromise,
+              kbFeaturePromise,
+            ]);
+
+            customObjects = loadedObjects;
+            preloadedQuestions = loadedQuestions;
+            if (org) {
+              companyInfoPrompt = buildCompanyInfoPrompt(org);
+              if (org.name) orgName = org.name;
             }
-            // Resolve agent config: wizard-selected agent ID takes priority,
-            // then fall back to the agent assigned to the called number,
-            // then org-level config.
-            try {
-              const explicitAgentId = sanitizedCallee ? vobizCallAgentId.get(sanitizedCallee) : null;
-              if (explicitAgentId) vobizCallAgentId.delete(sanitizedCallee);
+            if (knownName) callerContactName = knownName;
 
-              const byId = explicitAgentId
-                ? await getAgentConfigById(explicitAgentId, resolvedOrgId)
-                : null;
-
-              const { config: resolvedConfig } = byId || await getAgentConfigForNumber(calleeNumber, resolvedOrgId);
-              activeConfig = resolvedConfig;
+            if (agentResult?.config) {
+              activeConfig = agentResult.config;
               voiceName = VOICE_MAP[activeConfig.activeVoice] || voiceName;
-
               if (explicitAgentId) {
                 log.info(`🤖 Vobiz call using wizard-selected agent ${explicitAgentId} (voice: ${activeConfig.activeVoice})`);
               }
-            } catch (err) {
-              log.error("❌ Failed to load agent config for Vobiz call, using default:", err.message);
             }
-            // 'all' (default — every agent before this scoping existed, and
-            // the org-level fallback config with no agent at all, keep using
-            // the org's whole knowledge base), 'specific' (only these
-            // document ids), or 'none' (this agent doesn't use the KB).
+
+            // 'all' (default), 'specific' (only selected documents), or
+            // 'none' (this agent doesn't use the KB).
             kbMode = activeConfig.knowledgeBaseMode ?? "all";
             kbDocumentIds = kbMode === "specific" ? (activeConfig.knowledgeBaseDocumentIds || []) : null;
+            knowledgeBaseSearchEnabled = kbFeatureEnabled;
             try {
               orgHasKnowledgeBase = kbMode !== "none" && await knowledgeBase.hasContent(resolvedOrgId, kbDocumentIds);
             } catch (err) {
               log.error("❌ Failed to check knowledge base for Vobiz call org:", err.message);
             }
+          } else {
+            knowledgeBaseSearchEnabled = await featureFlags.isEnabled("knowledge_base_search").catch(() => false);
           }
           const { functionDeclarations: customToolDeclarations, promptSection: customObjectsPrompt } = buildCustomObjectTools(customObjects);
-          const knowledgeBaseSearchEnabled = await featureFlags.isEnabled("knowledge_base_search");
           let knowledgeBasePrompt = "";
           if (orgHasKnowledgeBase && knowledgeBaseSearchEnabled) {
             // Small enough to inline whole -> instant answers, no tool-call
@@ -671,11 +692,9 @@ If the caller asks anything about this business, its products, services, pricing
             }
           }
 
-          let questionsList = genericFallbackQuestions;
-          if (resolvedOrgId) {
-            try { questionsList = await db.getQuestions(resolvedOrgId); }
-            catch (err) { log.error("❌ Failed to load org questionnaire, using generic defaults:", err.message); }
-          }
+          // For org calls this was already loaded in parallel with the other
+          // startup lookups above. Keep the fallback for calls without an org.
+          const questionsList = preloadedQuestions;
 
           let activeQuestions = questionsList;
           let hasCustomTaskQuestions = false;
@@ -1204,15 +1223,22 @@ async function openGeminiSession(vobizWs, voiceName, systemPrompt, recordStream,
   // request initiated this specific WS session (it's a telephony
   // webhook), unlike the manual-dial/auto-dial paths that DO have one at
   // trigger time; usage still rolls up correctly by orgId regardless.
-  const usageHandle = await geminiUsageTracker.startUsageSession({
-    orgId,
-    callId,
-    sessionId: getStreamId ? getStreamId() : null,
-    provider: "vobiz",
-    model: modelName,
-  });
+  // Start usage tracking and resolve the tenant-scoped Vertex client in
+  // parallel. Neither operation depends on the other, so awaiting them
+  // sequentially only adds their latencies to the critical path before the
+  // Gemini Live socket can be opened.
+  const [usageHandle, geminiClient] = await Promise.all([
+    geminiUsageTracker.startUsageSession({
+      orgId,
+      callId,
+      sessionId: getStreamId ? getStreamId() : null,
+      provider: "vobiz",
+      model: modelName,
+    }),
+    genai.getClientForOrg(orgId),
+  ]);
 
-  const session = await (await genai.getClientForOrg(orgId)).live.connect({
+  const session = await geminiClient.live.connect({
     model: modelName,
     config: {
       systemInstruction: {
