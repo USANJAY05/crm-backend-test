@@ -331,9 +331,55 @@ async function finalizeCallRecord({
   }
 
   let aiSummary = fullTranscript.slice(0, 500);
+  let postCallSummary = null;
   if (transcriptLines.length > 0) {
-    const summary = await postCallAgents.generateCallSummary(fullTranscript, orgId, callAnswers, accumulateUsage);
-    if (summary) aiSummary = summary.text;
+    postCallSummary = await postCallAgents.generateCallSummary(fullTranscript, orgId, callAnswers, accumulateUsage, callerNumber);
+    if (postCallSummary) {
+      aiSummary = postCallSummary.text;
+
+      // The structured post-call summary is the canonical outcome. This is
+      // especially important for callback/redial calls: the callback and
+      // enquiry decisions must be made from the complete finished-call
+      // summary, not from whichever live function call happened to fire.
+      if (postCallSummary.callbackRequested) {
+        finalStatus = isMachineDetected ? "Answering Machine" : "Callback Scheduled";
+        if (!isMachineDetected) {
+          const parsed = postCallSummary.callbackTime ? new Date(postCallSummary.callbackTime) : null;
+          const usable = parsed && !Number.isNaN(parsed.getTime()) && parsed.getTime() > Date.now();
+          callbackTimeToStore = usable ? parsed.toISOString() : null;
+          callbackReasonToStore = postCallSummary.querySummary || callbackReasonToStore || null;
+          retryFieldsToSave = {
+            attemptNumber,
+            retryStatus: "pending",
+            nextRetryAt: usable ? parsed.toISOString() : new Date(Date.now() + 2 * 60 * 60 * 1000).toISOString(),
+            retryContext,
+          };
+        }
+      }
+
+      // Save a human-follow-up enquiry from the same canonical outcome when
+      // the summary says the AI could not resolve the caller's question.
+      // Callback always wins, so one call cannot become both outcomes.
+      if (!postCallSummary.callbackRequested && postCallSummary.enquiryRequested && postCallSummary.querySummary) {
+        try {
+          const existing = await db.list("enquiries", orgId);
+          const alreadySaved = (existing || []).some(e => String(e.callId || e.call_id || "") === String(callId));
+          if (!alreadySaved) {
+            await db.create("enquiries", orgId, {
+              callId,
+              name: postCallSummary.callerName || resolvedLeadName || null,
+              phone: callerNumber || null,
+              queryText: postCallSummary.querySummary,
+              status: "new",
+              createdAt: new Date().toISOString(),
+            });
+            log.info(`✅ [${provider}] Post-call summary saved enquiry for call ${callId}`);
+          }
+        } catch (err) {
+          log.error(`❌ [${provider}] Post-call summary enquiry save failed:`, err.message);
+        }
+      }
+    }
   }
 
   // This used to be fire-and-forget (db.create(...).then().catch(), never
