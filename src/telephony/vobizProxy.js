@@ -587,6 +587,32 @@ async function handleVobizSession(vobizWs, streamContext = null) {
   if (!fs.existsSync(tempDir)) fs.mkdirSync(tempDir, { recursive: true });
   const tempPcmPath = path.join(tempDir, `${generatedCallId}.pcm`);
   const recordStream = fs.createWriteStream(tempPcmPath);
+  // A call can end while Gemini still has an in-flight callback. Never let a
+  // late audio frame write to an ended/error stream: Node treats an
+  // unhandled WriteStream error as a process-level crash.
+  let recordStreamClosed = false;
+  recordStream.on("error", (err) => {
+    recordStreamClosed = true;
+    log.error(`❌ Vobiz recording stream error [${generatedCallId}]:`, err.message);
+  });
+  recordStream.on("finish", () => { recordStreamClosed = true; });
+  const writeRecording = (buffer) => {
+    if (recordStreamClosed || recordStream.destroyed || recordStream.writableEnded) return false;
+    try {
+      return recordStream.write(buffer);
+    } catch (err) {
+      recordStreamClosed = true;
+      log.error(`❌ Vobiz recording write failed [${generatedCallId}]:`, err.message);
+      return false;
+    }
+  };
+  const endRecording = () => {
+    if (recordStreamClosed || recordStream.destroyed || recordStream.writableEnded) return;
+    try { recordStream.end(); } catch (err) {
+      recordStreamClosed = true;
+      log.error(`❌ Vobiz recording close failed [${generatedCallId}]:`, err.message);
+    }
+  };
   const transcriptLines = [];
 
   // Default/fallback until the org is resolved in the "start" handler below
@@ -979,7 +1005,8 @@ If the tool result has 'deferred: true', tell the caller their personalized quot
             {
               prewarmedGeminiClientPromise,
               prewarmedFeatureFlagsPromise,
-            }
+            },
+            { writeRecording }
           ).then(session => {
             log.info(`✅ Gemini Live session open for Vobiz | Call ID: ${generatedCallId}`);
             if (global.broadcastLog) {
@@ -988,9 +1015,9 @@ If the tool result has 'deferred: true', tell the caller their personalized quot
             return session;
           }).catch(err => {
             log.error("❌ Gemini session failed for Vobiz:", err.message);
-            recordStream.close();
+            endRecording();
             try { fs.unlinkSync(tempPcmPath); } catch {}
-            vobizWs.close();
+            try { if (vobizWs.readyState === 1) vobizWs.close(); } catch {}
             return null;
           });
           };
@@ -1015,8 +1042,9 @@ If the tool result has 'deferred: true', tell the caller their personalized quot
             totalInboundAudioBytes += pcm16k.length;
             if (!isSilentPcm16(pcm16k)) silenceWatchdog.recordAudio();
 
-            // Save to recording file
-            recordStream.write(pcm16k);
+            // Save to recording file without allowing a late Gemini frame
+            // to crash the Node process after the call has already ended.
+            writeRecording(pcm16k);
           }
           break;
 
@@ -1067,9 +1095,20 @@ If the tool result has 'deferred: true', tell the caller their personalized quot
     isFinalized = true;
     isActive = false;
     silenceWatchdog.stop();
-    recordStream.end();
+    endRecording();
     const duration = Math.round((Date.now() - startTime) / 1000);
-    await new Promise(r => recordStream.on("finish", r));
+    if (!recordStreamClosed) {
+      await new Promise((resolve) => {
+        const onFinish = () => { cleanup(); resolve(); };
+        const onError = () => { cleanup(); resolve(); };
+        const cleanup = () => {
+          recordStream.off("finish", onFinish);
+          recordStream.off("error", onError);
+        };
+        recordStream.once("finish", onFinish);
+        recordStream.once("error", onError);
+      });
+    }
 
     // Retrieve caller phone number and resolved org (if any) from cache
     const rawCallerNumber = vobizCallNumbers.get(callId) || "Vobiz Call";
@@ -1161,15 +1200,20 @@ If the tool result has 'deferred: true', tell the caller their personalized quot
   });
 
   vobizWs.on("error", err => {
-    log.error("❌ Vobiz WS error:", err.message);
-    isActive = false;
+    log.error(`❌ Vobiz WS error [${generatedCallId}]:`, err.message);
+    // The websocket error itself is not a process-fatal condition. Finalize
+    // the call once so dialer state, recording and post-call processing are
+    // released even when Vobiz closes abnormally.
+    finalizeCall().catch((finalizeErr) => {
+      log.error(`❌ Vobiz finalize after WS error failed [${generatedCallId}]:`, finalizeErr.message);
+    });
   });
 }
 
 
 // GEMINI LIVE SESSION
 // ──────────═════════════════════
-async function openGeminiSession(vobizWs, voiceName, systemPrompt, recordStream, transcriptLines, callId, getStreamId, onTokenUsage, onAudioOut, onSetupComplete, getCallerNumber, customToolDeclarations = [], orgId = null, customObjects = [], getVobizCallId = null, resumeHandle = null, onResumptionHandle, onDisconnect, kbDocumentIds = null, normalizedQuestions = [], prewarmedDeps = null) {
+async function openGeminiSession(vobizWs, voiceName, systemPrompt, recordStream, transcriptLines, callId, getStreamId, onTokenUsage, onAudioOut, onSetupComplete, getCallerNumber, customToolDeclarations = [], orgId = null, customObjects = [], getVobizCallId = null, resumeHandle = null, onResumptionHandle, onDisconnect, kbDocumentIds = null, normalizedQuestions = [], prewarmedDeps = null, recordingHooks = null) {
   let loggedSampleServerContent = 0; // diagnostic-only counter, see onmessage below
   let lastRawBroadcastAt = 0;
 
@@ -1777,8 +1821,10 @@ async function openGeminiSession(vobizWs, voiceName, systemPrompt, recordStream,
               }
               startPacing();
 
-              // Save to recording file
-              recordStream.write(pcm16k);
+              // Save to recording file without allowing a late Gemini frame
+              // to crash the Node process after the call has already ended.
+              if (recordingHooks?.writeRecording) recordingHooks.writeRecording(pcm16k);
+              else if (!recordStream.destroyed && !recordStream.writableEnded) recordStream.write(pcm16k);
             }
           }
         }

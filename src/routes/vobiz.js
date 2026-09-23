@@ -72,15 +72,18 @@ router.post("/incoming", requireVobizWebhook, async (req, res) => {
   // they're handled here in one place instead of split across separate
   // no-answer/AMD checks that could each miss a case the others don't
   // cover.
+  const hangupOrgId = (req.body.Event === "Hangup" && CallUUID)
+    ? (vobizCallOrgs.get(CallUUID) || null)
+    : null;
+
   if (req.body.Event === "Hangup" && CallUUID) {
     // finalizeCall() cleans the in-memory org/call caches, so capture the
-    // org before awaiting it. Otherwise the authoritative Vobiz duration
-    // correction below sees no org and silently never updates call_logs.
-    const hangupOrgId = vobizCallOrgs.get(CallUUID) || null;
+    // org before awaiting it. The captured value is also used by the
+    // fallback and authoritative-duration paths below.
     vobizCallFinalizers.finalize(CallUUID)
       .then((finalized) => {
         if (finalized) return; // finalizeCall() already handled this call for real
-        if (!vobizCallOrgs.has(CallUUID)) return; // not one of ours, or its cache entry already expired
+        if (!hangupOrgId) return; // not one of ours, or its cache entry expired
 
         const orgId = hangupOrgId;
         const calleeNumber = vobizCallCallee.get(CallUUID) || To;
