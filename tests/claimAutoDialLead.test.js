@@ -49,4 +49,19 @@ describe("db.claimAutoDialLead", () => {
     expect(sql).toContain("UPDATE dialer_tasks");
     expect(params).toEqual([ORG_ID, TASK_ID, CLIENT_LEAD_ID, expect.any(String)]);
   });
+
+  test("builds the call_results JSON path with JSON_QUOTE($3), not raw string concatenation", async () => {
+    // Regression test for the "Invalid JSON path expression" failure a
+    // hyphenated client-generated lead id (e.g. L-mucnil3o-ts4f3k) used to
+    // trigger: CONCAT('$.', $3, '.status') produces an unquoted JSON path
+    // member name, which MySQL's JSON path grammar rejects for any id
+    // containing '-'. JSON_QUOTE($3) wraps the id as a quoted member name
+    // instead, which is valid for any string id.
+    const { claimAutoDialLead } = require("../src/db/repository");
+    await claimAutoDialLead(ORG_ID, TASK_ID, CLIENT_LEAD_ID);
+
+    const [sql] = mockConnection.query.mock.calls[0];
+    expect(sql).toContain("CONCAT('$.', JSON_QUOTE($3), '.status')");
+    expect(sql).not.toContain("CONCAT('$.', $3, '.status')");
+  });
 });

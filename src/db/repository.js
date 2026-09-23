@@ -915,7 +915,7 @@ async function claimAutoDialLead(orgId, taskId, leadId) {
       WHERE id = $2 AND org_id = $1 AND auto_dial_enabled = true AND current_lead_id IS NULL
       AND (next_dial_at IS NULL OR next_dial_at <= $4)
       AND EXISTS (SELECT 1 FROM leads AS l WHERE l.id = $3 AND l.org_id = $1)
-      AND COALESCE(JSON_UNQUOTE(JSON_EXTRACT(call_results, CONCAT('$.', $3, '.status'))), 'Pending') = 'Pending'`, [orgId, taskId, leadId, nowIso]);
+      AND COALESCE(JSON_UNQUOTE(JSON_EXTRACT(call_results, CONCAT('$.', JSON_QUOTE($3), '.status'))), 'Pending') = 'Pending'`, [orgId, taskId, leadId, nowIso]);
     // The UPDATE itself is the compare-and-set claim. If another scheduler
     // instance won the row first, affectedRows is 0 and this worker must not
     // read the row and accidentally treat the other worker's claim as its own.

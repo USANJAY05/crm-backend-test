@@ -165,4 +165,52 @@ const run = process.env.MYSQL_INTEGRATION_TESTS === "1";
       conn.release();
     }
   });
+
+  test("claimAutoDialLead accepts a hyphenated client-generated lead id", async () => {
+    // Regression test for the "Invalid JSON path expression" MySQL error a
+    // real client-generated lead id (frontend/src/lib/ids.ts:newClientId,
+    // e.g. "L-mucnil3o-ts4f3k") used to trigger: the call_results JSON
+    // path was built via CONCAT('$.', $leadId, '.status'), an unquoted
+    // JSON path member name, which MySQL's JSON path grammar rejects for
+    // any id containing '-'. This exercises the real MySQL JSON path
+    // parser, which a mocked pool (see tests/claimAutoDialLead.test.js)
+    // cannot.
+    const { claimAutoDialLead } = require("../src/db/repository");
+    const hyphenatedLeadId = "L-mucnil3o-ts4f3k";
+    const taskId = `itest-task-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+
+    const lead = await db.from("leads").insert({
+      id: hyphenatedLeadId,
+      org_id: orgId,
+      name: "Hyphenated Lead",
+      phone: "+919999999901",
+    }).single();
+    expect(lead.error).toBeNull();
+
+    const task = await db.from("dialer_tasks").insert({
+      id: taskId,
+      org_id: orgId,
+      name: "Integration Auto-Dial Task",
+      lead_ids: [hyphenatedLeadId],
+      call_results: {},
+      auto_dial_enabled: true,
+      auto_dial_status: "waiting",
+      next_dial_at: new Date(Date.now() - 1000).toISOString(),
+    }).single();
+    expect(task.error).toBeNull();
+
+    try {
+      const claimed = await claimAutoDialLead(orgId, taskId, hyphenatedLeadId);
+      expect(claimed).not.toBeNull();
+      expect(claimed.currentLeadId).toBe(hyphenatedLeadId);
+
+      // Compare-and-set semantics preserved: the lead is now claimed, so a
+      // second attempt must not re-claim it.
+      const secondAttempt = await claimAutoDialLead(orgId, taskId, hyphenatedLeadId);
+      expect(secondAttempt).toBeNull();
+    } finally {
+      await pool.query("DELETE FROM dialer_tasks WHERE id = ?", [taskId]);
+      await pool.query("DELETE FROM leads WHERE id = ?", [hyphenatedLeadId]);
+    }
+  });
 });
