@@ -481,7 +481,7 @@ const TABLES = {
       // on the Cost page never retroactively re-prices a session that
       // already happened; billing reads sum these stored columns instead
       // of recomputing tokens x the current rate.
-      platform_cost_provider_key: "text", platform_rate_per_1k: "real", platform_token_unit: "int", platform_tax_percent: "real",
+      platform_cost_provider_key: "text", platform_pricing_mode: "text", platform_rate_per_1k: "real", platform_token_unit: "int", platform_time_rate_amount: "real", platform_time_unit: "text", platform_tax_percent: "real",
       platform_base_cost_inr: "real", platform_tax_amount_inr: "real", platform_total_cost_inr: "real",
       created_at: "text", updated_at: "text"
     }

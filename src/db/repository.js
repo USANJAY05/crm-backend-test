@@ -234,8 +234,8 @@ const ENTITIES = {
       reconciliationStatus: "reconciliation_status", reconciledAt: "reconciled_at",
       // Platform-rate (INR) cost, locked in at finalize time — see
       // ai/geminiUsageTracker.js and migrations/add_ai_session_usage_platform_cost.sql.
-      platformCostProviderKey: "platform_cost_provider_key", platformRatePer1k: "platform_rate_per_1k",
-      platformTokenUnit: "platform_token_unit",
+      platformCostProviderKey: "platform_cost_provider_key", platformPricingMode: "platform_pricing_mode", platformRatePer1k: "platform_rate_per_1k",
+      platformTokenUnit: "platform_token_unit", platformTimeRateAmount: "platform_time_rate_amount", platformTimeUnit: "platform_time_unit",
       platformTaxPercent: "platform_tax_percent", platformBaseCostInr: "platform_base_cost_inr",
       platformTaxAmountInr: "platform_tax_amount_inr", platformTotalCostInr: "platform_total_cost_inr",
       createdAt: "created_at", updatedAt: "updated_at"

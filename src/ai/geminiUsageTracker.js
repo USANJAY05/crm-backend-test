@@ -179,7 +179,7 @@ async function finalizeUsageSession(handle, { status = "completed", errorCode = 
     // block a session from finalizing.
     let platformCost = null;
     try {
-      platformCost = await costProviders.computeAiCost({ providerKey: handle.costProviderKey || "gemini", totalTokens });
+      platformCost = await costProviders.computeAiCost({ providerKey: handle.costProviderKey || "gemini", totalTokens, durationSeconds });
     } catch (err) {
       log.warn(`⚠️ [geminiUsageTracker] platform cost lookup failed for session ${handle.id}:`, err.message);
     }
@@ -194,8 +194,11 @@ async function finalizeUsageSession(handle, { status = "completed", errorCode = 
       currency: cost.currency,
       pricingVersion: cost.pricingVersion,
       platformCostProviderKey: platformCost?.providerKey ?? null,
+      platformPricingMode: platformCost?.pricingMode ?? null,
       platformRatePer1k: platformCost?.ratePer1kTokens ?? null,
       platformTokenUnit: platformCost?.tokenUnit ?? null,
+      platformTimeRateAmount: platformCost?.timeRateAmount ?? null,
+      platformTimeUnit: platformCost?.timeUnit ?? null,
       platformTaxPercent: platformCost?.taxPercent ?? null,
       platformBaseCostInr: platformCost?.baseCost ?? null,
       platformTaxAmountInr: platformCost?.taxAmount ?? null,

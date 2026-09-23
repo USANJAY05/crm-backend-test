@@ -44,6 +44,7 @@ const CALL_RATE_UNITS = ["minute", "hour"];
 // "1" lets an admin quote a genuine per-token rate for a cheap/high-
 // volume model.
 const AI_TOKEN_UNITS = [1, 100, 1000, 1000000];
+const AI_TIME_UNITS = ["minute", "second"];
 const DEFAULT_AI_TOKEN_UNIT = 1000;
 
 // The only providers this codebase actually places calls/AI requests
@@ -59,11 +60,11 @@ const KNOWN_PROVIDERS = [
   },
   {
     key: "gemini", kind: "ai", label: "Gemini (Live Voice)",
-    defaults: { ratePer1kTokens: 0, tokenUnit: DEFAULT_AI_TOKEN_UNIT, taxPercent: 0 },
+    defaults: { pricingMode: "token", ratePer1kTokens: 0, tokenUnit: DEFAULT_AI_TOKEN_UNIT, timeRateAmount: 0, timeUnit: "minute", taxPercent: 0 },
   },
   {
     key: "gemini-postcall", kind: "ai", label: "Gemini (Post-Call Agents)",
-    defaults: { ratePer1kTokens: 0, tokenUnit: DEFAULT_AI_TOKEN_UNIT, taxPercent: 0 },
+    defaults: { pricingMode: "token", ratePer1kTokens: 0, tokenUnit: DEFAULT_AI_TOKEN_UNIT, timeRateAmount: 0, timeUnit: "minute", taxPercent: 0 },
   },
 ];
 
@@ -97,8 +98,11 @@ async function listProviders() {
       provider.rateUnit = o?.rateUnit ?? defaults.rateUnit;
       provider.rateAmount = o?.rateAmount ?? defaults.rateAmount;
     } else {
+      provider.pricingMode = o?.pricingMode ?? defaults.pricingMode ?? "token";
       provider.ratePer1kTokens = o?.ratePer1kTokens ?? defaults.ratePer1kTokens;
       provider.tokenUnit = o?.tokenUnit ?? defaults.tokenUnit;
+      provider.timeRateAmount = o?.timeRateAmount ?? defaults.timeRateAmount ?? 0;
+      provider.timeUnit = o?.timeUnit ?? defaults.timeUnit ?? "minute";
     }
     return provider;
   });
@@ -129,12 +133,23 @@ function sanitizeProviderInput(known, input, existingOverride) {
     override.rateUnit = rateUnit;
     override.rateAmount = rateAmount;
   } else {
+    const pricingMode = input.pricingMode ?? existingOverride?.pricingMode ?? known.defaults.pricingMode ?? "token";
+    if (!["token", "time"].includes(pricingMode)) throw new Error("pricingMode must be token or time");
+    override.pricingMode = pricingMode;
+
     const ratePer1kTokens = input.ratePer1kTokens !== undefined ? Number(input.ratePer1kTokens) : (existingOverride?.ratePer1kTokens ?? known.defaults.ratePer1kTokens);
     if (!Number.isFinite(ratePer1kTokens) || ratePer1kTokens < 0) throw new Error("ratePer1kTokens must be a non-negative number");
     const tokenUnit = input.tokenUnit !== undefined ? Number(input.tokenUnit) : (existingOverride?.tokenUnit ?? known.defaults.tokenUnit);
     if (!AI_TOKEN_UNITS.includes(tokenUnit)) throw new Error(`tokenUnit must be one of ${AI_TOKEN_UNITS.join(", ")}`);
     override.ratePer1kTokens = ratePer1kTokens;
     override.tokenUnit = tokenUnit;
+
+    const timeRateAmount = input.timeRateAmount !== undefined ? Number(input.timeRateAmount) : (existingOverride?.timeRateAmount ?? known.defaults.timeRateAmount ?? 0);
+    if (!Number.isFinite(timeRateAmount) || timeRateAmount < 0) throw new Error("timeRateAmount must be a non-negative number");
+    const timeUnit = input.timeUnit ?? existingOverride?.timeUnit ?? known.defaults.timeUnit ?? "minute";
+    if (!AI_TIME_UNITS.includes(timeUnit)) throw new Error(`timeUnit must be one of ${AI_TIME_UNITS.join(", ")}`);
+    override.timeRateAmount = timeRateAmount;
+    override.timeUnit = timeUnit;
   }
 
   return override;
@@ -195,15 +210,30 @@ async function computeCallCost({ providerKey = "vobiz", seconds }) {
  *  tokenUnit tokens" (field name kept for backward compatibility with
  *  already-stored providers/sessions, not literally "per 1,000" anymore
  *  unless tokenUnit is 1000). */
-async function computeAiCost({ providerKey = "gemini", totalTokens }) {
+async function computeAiCost({ providerKey = "gemini", totalTokens = 0, durationSeconds = 0 }) {
   const provider = await getProviderByKey(providerKey, "ai");
-  if (!provider || !provider.active || !provider.ratePer1kTokens) return null;
+  if (!provider || !provider.active) return null;
+
+  if ((provider.pricingMode ?? "token") === "time") {
+    if (!provider.timeRateAmount) return null;
+    const timeUnit = provider.timeUnit || "minute";
+    const units = timeUnit === "second" ? (Number(durationSeconds) || 0) : ((Number(durationSeconds) || 0) / 60);
+    const base = units * provider.timeRateAmount;
+    const { baseCost, taxAmount, totalCost } = applyTax(base, provider.taxPercent);
+    return {
+      providerKey: provider.key, providerLabel: provider.label,
+      pricingMode: "time", timeRateAmount: provider.timeRateAmount, timeUnit,
+      taxPercent: provider.taxPercent || 0, baseCost, taxAmount, totalCost,
+    };
+  }
+
+  if (!provider.ratePer1kTokens) return null;
   const tokenUnit = provider.tokenUnit || DEFAULT_AI_TOKEN_UNIT;
-  const base = ((totalTokens || 0) / tokenUnit) * provider.ratePer1kTokens;
+  const base = ((Number(totalTokens) || 0) / tokenUnit) * provider.ratePer1kTokens;
   const { baseCost, taxAmount, totalCost } = applyTax(base, provider.taxPercent);
   return {
     providerKey: provider.key, providerLabel: provider.label,
-    ratePer1kTokens: provider.ratePer1kTokens, tokenUnit, taxPercent: provider.taxPercent || 0,
+    pricingMode: "token", ratePer1kTokens: provider.ratePer1kTokens, tokenUnit, taxPercent: provider.taxPercent || 0,
     baseCost, taxAmount, totalCost,
   };
 }
