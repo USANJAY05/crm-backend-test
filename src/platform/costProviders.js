@@ -208,6 +208,22 @@ async function computeAiCost({ providerKey = "gemini", totalTokens }) {
   };
 }
 
+/** The per-minute INR figure (tax included) that drives every org-facing
+ *  "AI voice cost" display — Billing & Usage, Reports, Dashboard,
+ *  Settings, etc. Sourced from the first active call-kind provider with a
+ *  rate set (converted from an hourly rate if that's how it's quoted),
+ *  never a separate manually-kept-in-sync number. There's only one call
+ *  provider today (Vobiz); once a second is added, whichever is marked
+ *  active becomes this figure automatically. Returns 0 if no call
+ *  provider is active/priced. */
+async function getPrimaryCallProviderRate() {
+  const providers = await listProviders();
+  const provider = providers.find((p) => p.kind === "call" && p.active && p.rateAmount > 0);
+  if (!provider) return 0;
+  const result = await computeCallCost({ providerKey: provider.key, seconds: 60 });
+  return result ? result.totalCost : 0;
+}
+
 module.exports = {
   KNOWN_PROVIDERS,
   AI_TOKEN_UNITS,
@@ -217,4 +233,5 @@ module.exports = {
   getProviderByKey,
   computeCallCost,
   computeAiCost,
+  getPrimaryCallProviderRate,
 };

@@ -9,7 +9,7 @@
 // ============================================================
 
 const db = require("../db/repository");
-const { costForMinutes, getCostPerMinuteInr, setCostPerMinuteInr, getPhoneCostPerMinute, setPhoneCostPerMinute } = require("./pricing");
+const { costForMinutes, getCostPerMinuteInr, getPhoneCostPerMinute, setPhoneCostPerMinute } = require("./pricing");
 const costProviders = require("./costProviders");
 const auditLog = require("./auditLog");
 const featureFlags = require("./featureFlags");
@@ -258,17 +258,15 @@ async function getOrganizationDetail(orgId) {
 
 async function getPricing() {
   return {
+    // Derived live from the active call provider on the Cost page — see
+    // platform/pricing.js's getCostPerMinuteInr. Not settable here.
     costPerMinuteInr: await getCostPerMinuteInr(),
     phoneCostPerMinute: await getPhoneCostPerMinute(),
   };
 }
 
-async function updatePricing(actor, costPerMinuteInr, phoneCostPerMinute) {
+async function updatePricing(actor, phoneCostPerMinute) {
   const result = {};
-  if (costPerMinuteInr !== undefined) {
-    result.costPerMinuteInr = await setCostPerMinuteInr(costPerMinuteInr);
-    await auditLog.record(null, actor, "platform.pricing.update", "pricing", "cost_per_minute_inr", { costPerMinuteInr: result.costPerMinuteInr });
-  }
   if (phoneCostPerMinute !== undefined) {
     result.phoneCostPerMinute = await setPhoneCostPerMinute(phoneCostPerMinute);
     await auditLog.record(null, actor, "platform.pricing.update", "pricing", "phone_cost_per_minute", { phoneCostPerMinute: result.phoneCostPerMinute });

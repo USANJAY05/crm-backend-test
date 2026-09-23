@@ -1,28 +1,26 @@
 // ============================================================
 // services/pricing.js
 //
-// Flat per-minute AI voice cost, billed in INR. Not tied to any real
+// Per-minute AI voice cost, billed in INR. Not tied to any real
 // payment processor (billingEngine.js doesn't collect payments) —
 // this is a cost estimate derived from real call/usage minutes.
 //
-// The rate is controlled live from the super admin panel (platform
-// settings key "pricing.cost_per_minute_inr") — DEFAULT_COST_PER_MINUTE_INR
-// is only the fallback used before an admin ever sets one.
+// This used to be its own manually-set platform setting, independent of
+// the Cost page's per-provider rates. It's now derived live from
+// whichever call provider is active there (platform/costProviders.js),
+// so a future provider with a different rate flows straight into every
+// org-facing "AI voice cost" display the moment it's marked active —
+// no separate number to keep in sync by hand.
 // ============================================================
 
 const platformSettings = require("./settings");
 
-const PRICING_KEY = "pricing.cost_per_minute_inr";
-const DEFAULT_COST_PER_MINUTE_INR = 6;
-
 async function getCostPerMinuteInr() {
-  return platformSettings.getSetting(PRICING_KEY, DEFAULT_COST_PER_MINUTE_INR);
-}
-
-async function setCostPerMinuteInr(value) {
-  const num = Number(value);
-  if (!Number.isFinite(num) || num < 0) throw new Error("cost_per_minute_inr must be a non-negative number");
-  return platformSettings.setSetting(PRICING_KEY, num);
+  // Lazily required to avoid a circular require (costProviders ->
+  // platform/settings -> db/repository -> pricing, same cycle
+  // phoneCostForSeconds below avoids).
+  const { getPrimaryCallProviderRate } = require("./costProviders");
+  return getPrimaryCallProviderRate();
 }
 
 async function costForMinutes(minutes) {
@@ -78,9 +76,7 @@ async function phoneCostForSeconds(seconds) {
 }
 
 module.exports = {
-  DEFAULT_COST_PER_MINUTE_INR,
   getCostPerMinuteInr,
-  setCostPerMinuteInr,
   costForMinutes,
   costForSeconds,
   DEFAULT_PHONE_COST_PER_MINUTE,

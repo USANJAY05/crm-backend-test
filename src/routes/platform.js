@@ -147,7 +147,7 @@ router.get("/pricing", async (req, res) => {
 router.put("/pricing", async (req, res) => {
   try {
     const actor = { userId: req.userId, userEmail: req.userEmail };
-    res.json(await platformAdmin.updatePricing(actor, req.body?.costPerMinuteInr, req.body?.phoneCostPerMinute));
+    res.json(await platformAdmin.updatePricing(actor, req.body?.phoneCostPerMinute));
   } catch (err) {
     handleError(err, res);
   }
