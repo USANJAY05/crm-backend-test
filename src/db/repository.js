@@ -899,7 +899,13 @@ async function hasNewerCallForPhone(orgId, phone, sinceIso, excludeId) {
 // see services/dialerRetryEngine.js. Unscoped (no org_id filter) since the
 // retry loop runs on its own timer, not inside a per-org request.
 async function claimAutoDialLead(orgId, taskId, leadId) {
-  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(String(leadId || ""))) {
+  // leadId is a lead's `leads.id` — client-generated (see
+  // frontend/src/lib/ids.ts:newClientId), not an RFC-4122 UUID, so this
+  // only rejects empty/missing values. Every other clause below still
+  // scopes strictly by org_id ($1), so a non-UUID (or malformed) leadId
+  // can at most fail to match any row for this org — it cannot widen
+  // access to another org's data.
+  if (!String(leadId || "").trim()) {
     throw new Error("[db.claimAutoDialLead] invalid lead id");
   }
   const nowIso = new Date().toISOString();
