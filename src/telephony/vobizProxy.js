@@ -252,6 +252,120 @@ const vobizCallFinalizers = createCallFinalizerRegistry();
 // callee-number (sanitized) -> agentId explicitly selected by the wizard
 const vobizCallAgentId = new Map();
 
+// CallUUID/callSid -> in-flight/settled Promise of resolveVobizCallSetup()'s
+// result. For outbound calls, org/agent/questionnaire/KB lookups are kicked
+// off the moment the call is PLACED (see triggerVobizOutboundCall) instead of
+// waiting for the callee to answer — the phone typically rings for several
+// seconds, which is otherwise dead time. The "start" handler below checks
+// here first and only falls back to doing the lookups itself (the original,
+// still-correct behavior) when nothing was pre-warmed — e.g. inbound calls,
+// which can't be pre-warmed since the org isn't known until the call rings.
+const vobizPrewarmedSetup = new Map();
+setInterval(() => {
+  // Belt-and-suspenders cleanup in case a call's own TTL cleanup (set where
+  // each entry is created) never runs — mirrors the 30-minute horizon used
+  // by every other vobizCall* cache in this file.
+  if (vobizPrewarmedSetup.size > 500) vobizPrewarmedSetup.clear();
+}, 1800000).unref();
+
+// Extracted from the "start" handler's inline lookups so the exact same
+// logic can run either post-answer (inbound, or outbound as a fallback) or
+// pre-answer during ringing (outbound pre-warm) — see vobizPrewarmedSetup.
+// Behavior is unchanged from the original inline version; only the call
+// site moved.
+async function resolveVobizCallSetup(resolvedOrgId, calleeNumber, resolvedPhone, direction, explicitAgentId, genericFallbackQuestions) {
+  let customObjects = [];
+  let orgHasKnowledgeBase = false;
+  let kbMode = "all";
+  let kbDocumentIds = null;
+  let companyInfoPrompt = "";
+  let knowledgeBaseSearchEnabled = false;
+  let questionsList = genericFallbackQuestions;
+  let resolvedOrgName = null;
+  let knownContactName = null;
+  let resolvedConfig = null;
+  let resolvedVoiceName = null;
+
+  if (!resolvedOrgId) {
+    knowledgeBaseSearchEnabled = await featureFlags.isEnabled("knowledge_base_search").catch(() => false);
+    return { customObjects, orgHasKnowledgeBase, kbMode, kbDocumentIds, companyInfoPrompt, knowledgeBaseSearchEnabled, questionsList, orgName: resolvedOrgName, callerContactName: knownContactName, activeConfig: resolvedConfig, voiceName: resolvedVoiceName };
+  }
+
+  const lookupPhone = direction === "outbound" ? calleeNumber : resolvedPhone;
+
+  const customObjectsPromise = objectsEngine.listObjects(resolvedOrgId).catch((err) => {
+    log.error("❌ Failed to load custom objects for Vobiz call org:", err.message);
+    return [];
+  });
+  const orgPromise = db.getOrg(resolvedOrgId).catch((err) => {
+    log.error("❌ Failed to load org profile for Vobiz call:", err.message);
+    return null;
+  });
+  const callerIdentityPromise = (async () => {
+    if (!lookupPhone) return null;
+    const leadMatch = await db.findLeadByPhone(resolvedOrgId, lookupPhone);
+    if (leadMatch?.name) return leadMatch.name;
+    const recordMatch = await objectsEngine.findRecordByPhone(resolvedOrgId, lookupPhone);
+    return recordMatch?.name || null;
+  })().catch((err) => {
+    log.error("❌ Failed to look up caller identity for Vobiz call:", err.message);
+    return null;
+  });
+  const agentConfigPromise = (explicitAgentId
+    ? getAgentConfigById(explicitAgentId, resolvedOrgId)
+    : getAgentConfigForNumber(calleeNumber, resolvedOrgId)
+  ).catch((err) => {
+    log.error("❌ Failed to load agent config for Vobiz call, using default:", err.message);
+    return null;
+  });
+  const questionsPromise = db.getQuestions(resolvedOrgId).catch((err) => {
+    log.error("❌ Failed to load org questionnaire, using generic defaults:", err.message);
+    return genericFallbackQuestions;
+  });
+  const kbFeaturePromise = featureFlags.isEnabled("knowledge_base_search").catch(() => false);
+
+  const [loadedObjects, org, knownName, agentResult, loadedQuestions, kbFeatureEnabled] = await Promise.all([
+    customObjectsPromise,
+    orgPromise,
+    callerIdentityPromise,
+    agentConfigPromise,
+    questionsPromise,
+    kbFeaturePromise,
+  ]);
+
+  customObjects = loadedObjects;
+  questionsList = loadedQuestions;
+  if (org) {
+    companyInfoPrompt = buildCompanyInfoPrompt(org);
+    if (org.name) resolvedOrgName = org.name;
+  }
+  if (knownName) knownContactName = knownName;
+
+  if (agentResult?.config) {
+    resolvedConfig = agentResult.config;
+    resolvedVoiceName = VOICE_MAP[resolvedConfig.activeVoice] || null;
+    if (explicitAgentId) {
+      log.info(`🤖 Vobiz call using wizard-selected agent ${explicitAgentId} (voice: ${resolvedConfig.activeVoice})`);
+    }
+  }
+
+  // 'all' (default), 'specific' (only selected documents), or 'none' (this
+  // agent doesn't use the KB). Falls back to the module-level default config
+  // when no agent-specific config was resolved, same as the original inline
+  // version.
+  const effectiveConfig = resolvedConfig || getConfig();
+  kbMode = effectiveConfig.knowledgeBaseMode ?? "all";
+  kbDocumentIds = kbMode === "specific" ? (effectiveConfig.knowledgeBaseDocumentIds || []) : null;
+  knowledgeBaseSearchEnabled = kbFeatureEnabled;
+  try {
+    orgHasKnowledgeBase = kbMode !== "none" && await knowledgeBase.hasContent(resolvedOrgId, kbDocumentIds);
+  } catch (err) {
+    log.error("❌ Failed to check knowledge base for Vobiz call org:", err.message);
+  }
+
+  return { customObjects, orgHasKnowledgeBase, kbMode, kbDocumentIds, companyInfoPrompt, knowledgeBaseSearchEnabled, questionsList, orgName: resolvedOrgName, callerContactName: knownContactName, activeConfig: resolvedConfig, voiceName: resolvedVoiceName };
+}
+
 async function triggerVobizOutboundCall(orgId, phoneNumber, { questions, from, language, assignedContact, baseUrl, attemptNumber = 1, starhealthEnabled = false, agentId, taskId = null, leadId = null } = {}) {
   const channelsEngine = require("../channels/engine");
   const billingEngine = require("../crm/billingEngine");
@@ -381,6 +495,23 @@ async function triggerVobizOutboundCall(orgId, phoneNumber, { questions, from, l
   // of whatever originally placed this call.
   vobizCallRetryContext.set(callSid, { questions, from, language, assignedContact, taskId, leadId });
   setTimeout(() => vobizCallRetryContext.delete(callSid), 1800000);
+
+  // Pre-warm org/agent/questionnaire/KB lookups now, while the callee's phone
+  // is still ringing, instead of waiting for the "start" handler to do it
+  // after they've already said hello — see vobizPrewarmedSetup above. Every
+  // input this needs (orgId, the number being called, agentId) is already
+  // known at this point; only failures here are swallowed (falls back to the
+  // normal post-answer lookup path) so a pre-warm problem can never break the
+  // call itself.
+  const prewarmPromise = resolveVobizCallSetup(orgId, phoneNumber, null, "outbound", agentId || null, undefined)
+    .catch((err) => {
+      log.error("❌ Vobiz pre-warm lookup failed, will retry post-answer:", err.message);
+      vobizPrewarmedSetup.delete(callSid);
+      return null;
+    });
+  vobizPrewarmedSetup.set(callSid, prewarmPromise);
+  setTimeout(() => vobizPrewarmedSetup.delete(callSid), 1800000);
+
   return { success: true, callSid };
 }
 
@@ -574,84 +705,36 @@ async function handleVobizSession(vobizWs, streamContext = null) {
           let knowledgeBaseSearchEnabled = false;
           let preloadedQuestions = genericFallbackQuestions;
 
-          // These lookups are independent of each other. Running them together
-          // removes the old waterfall where objects -> org -> caller -> agent
-          // config each had to finish before Gemini could even be opened.
-          // The call's prompt still waits for all required data, but the wall
-          // clock is now close to the slowest lookup instead of their sum.
-          if (resolvedOrgId) {
-            const lookupPhone = (vobizCallDirection.get(callId) || "inbound") === "outbound" ? calleeNumber : resolvedPhone;
-            const explicitAgentId = sanitizedCallee ? vobizCallAgentId.get(sanitizedCallee) : null;
-            if (explicitAgentId) vobizCallAgentId.delete(sanitizedCallee);
+          const explicitAgentId = sanitizedCallee ? vobizCallAgentId.get(sanitizedCallee) : null;
+          if (explicitAgentId) vobizCallAgentId.delete(sanitizedCallee);
 
-            const customObjectsPromise = objectsEngine.listObjects(resolvedOrgId).catch((err) => {
-              log.error("❌ Failed to load custom objects for Vobiz call org:", err.message);
-              return [];
-            });
-            const orgPromise = db.getOrg(resolvedOrgId).catch((err) => {
-              log.error("❌ Failed to load org profile for Vobiz call:", err.message);
-              return null;
-            });
-            const callerIdentityPromise = (async () => {
-              if (!lookupPhone) return null;
-              const leadMatch = await db.findLeadByPhone(resolvedOrgId, lookupPhone);
-              if (leadMatch?.name) return leadMatch.name;
-              const recordMatch = await objectsEngine.findRecordByPhone(resolvedOrgId, lookupPhone);
-              return recordMatch?.name || null;
-            })().catch((err) => {
-              log.error("❌ Failed to look up caller identity for Vobiz call:", err.message);
-              return null;
-            });
-            const agentConfigPromise = (explicitAgentId
-              ? getAgentConfigById(explicitAgentId, resolvedOrgId)
-              : getAgentConfigForNumber(calleeNumber, resolvedOrgId)
-            ).catch((err) => {
-              log.error("❌ Failed to load agent config for Vobiz call, using default:", err.message);
-              return null;
-            });
-            const questionsPromise = db.getQuestions(resolvedOrgId).catch((err) => {
-              log.error("❌ Failed to load org questionnaire, using generic defaults:", err.message);
-              return genericFallbackQuestions;
-            });
-            const kbFeaturePromise = featureFlags.isEnabled("knowledge_base_search").catch(() => false);
+          // Outbound calls have their org/agent/questionnaire/KB lookups
+          // already kicked off (and often already finished) back when the
+          // call was placed — see vobizPrewarmedSetup / triggerVobizOutboundCall.
+          // Reuse that instead of repeating the same lookups from scratch now
+          // that the callee has already answered. Inbound calls (org unknown
+          // until the call rings) and any outbound call whose pre-warm never
+          // registered/expired/failed fall through to the original on-demand
+          // lookup, unchanged.
+          const prewarmed = vobizPrewarmedSetup.has(callId) ? await vobizPrewarmedSetup.get(callId) : null;
+          vobizPrewarmedSetup.delete(callId);
 
-            const [loadedObjects, org, knownName, agentResult, loadedQuestions, kbFeatureEnabled] = await Promise.all([
-              customObjectsPromise,
-              orgPromise,
-              callerIdentityPromise,
-              agentConfigPromise,
-              questionsPromise,
-              kbFeaturePromise,
-            ]);
+          const setup = prewarmed || (resolvedOrgId
+            ? await resolveVobizCallSetup(resolvedOrgId, calleeNumber, resolvedPhone, vobizCallDirection.get(callId) || "inbound", explicitAgentId, genericFallbackQuestions)
+            : await resolveVobizCallSetup(null, calleeNumber, resolvedPhone, "inbound", null, genericFallbackQuestions));
 
-            customObjects = loadedObjects;
-            preloadedQuestions = loadedQuestions;
-            if (org) {
-              companyInfoPrompt = buildCompanyInfoPrompt(org);
-              if (org.name) orgName = org.name;
-            }
-            if (knownName) callerContactName = knownName;
-
-            if (agentResult?.config) {
-              activeConfig = agentResult.config;
-              voiceName = VOICE_MAP[activeConfig.activeVoice] || voiceName;
-              if (explicitAgentId) {
-                log.info(`🤖 Vobiz call using wizard-selected agent ${explicitAgentId} (voice: ${activeConfig.activeVoice})`);
-              }
-            }
-
-            // 'all' (default), 'specific' (only selected documents), or
-            // 'none' (this agent doesn't use the KB).
-            kbMode = activeConfig.knowledgeBaseMode ?? "all";
-            kbDocumentIds = kbMode === "specific" ? (activeConfig.knowledgeBaseDocumentIds || []) : null;
-            knowledgeBaseSearchEnabled = kbFeatureEnabled;
-            try {
-              orgHasKnowledgeBase = kbMode !== "none" && await knowledgeBase.hasContent(resolvedOrgId, kbDocumentIds);
-            } catch (err) {
-              log.error("❌ Failed to check knowledge base for Vobiz call org:", err.message);
-            }
-          } else {
-            knowledgeBaseSearchEnabled = await featureFlags.isEnabled("knowledge_base_search").catch(() => false);
+          customObjects = setup.customObjects;
+          preloadedQuestions = setup.questionsList || genericFallbackQuestions;
+          orgHasKnowledgeBase = setup.orgHasKnowledgeBase;
+          kbMode = setup.kbMode;
+          kbDocumentIds = setup.kbDocumentIds;
+          companyInfoPrompt = setup.companyInfoPrompt;
+          knowledgeBaseSearchEnabled = setup.knowledgeBaseSearchEnabled;
+          if (setup.orgName) orgName = setup.orgName;
+          if (setup.callerContactName) callerContactName = setup.callerContactName;
+          if (setup.activeConfig) {
+            activeConfig = setup.activeConfig;
+            voiceName = setup.voiceName || voiceName;
           }
           const { functionDeclarations: customToolDeclarations, promptSection: customObjectsPrompt } = buildCustomObjectTools(customObjects);
           let knowledgeBasePrompt = "";
@@ -1086,7 +1169,15 @@ async function openGeminiSession(vobizWs, voiceName, systemPrompt, recordStream,
   // as one continuous stream instead of each restarting at sample 0 (see
   // createResampler24To16's comment). Must NOT be shared across calls.
   const resampleOut = createResampler24To16();
-  const outboundQueue = [];
+  // Buffer, not a plain array — pushing PCM byte-by-byte into a JS array
+  // (the previous implementation) meant tens of thousands of individual
+  // Array.push() calls per audio chunk, repeated many times a second. With
+  // several outbound calls running concurrently in this one Node process
+  // (see DIAL_CONCURRENCY in autoDialEngine.js), that CPU/GC load was enough
+  // to delay this call's own 20ms pacer tick below, which is what callers
+  // heard as mid-call stutter/voice breaks. Buffer.concat/subarray do the
+  // same job as native memcpy/views instead of per-byte JS overhead.
+  let outboundQueue = Buffer.alloc(0);
   let intervalId = null;
   // Throttled visibility into the buffering layer (chunk sizes in/out,
   // queue depth, send cadence) without logging call content — one
@@ -1112,7 +1203,8 @@ async function openGeminiSession(vobizWs, voiceName, systemPrompt, recordStream,
       }
       // 640 bytes of PCM16 represents 20ms of audio at 16kHz (320 samples * 2 bytes)
       if (outboundQueue.length >= 640) {
-        const chunk = Buffer.from(outboundQueue.splice(0, 640));
+        const chunk = outboundQueue.subarray(0, 640);
+        outboundQueue = outboundQueue.subarray(640);
         sendJson(vobizWs, {
           event: "playAudio",
           media: {
@@ -1142,7 +1234,7 @@ async function openGeminiSession(vobizWs, voiceName, systemPrompt, recordStream,
       clearInterval(intervalId);
       intervalId = null;
     }
-    outboundQueue.length = 0;
+    outboundQueue = Buffer.alloc(0);
     hasPrebuffered = false;
   };
 
@@ -1611,14 +1703,12 @@ async function openGeminiSession(vobizWs, voiceName, systemPrompt, recordStream,
                 fillerTimer = null;
               }
               if (fillerPlaying) {
-                outboundQueue.length = 0;
+                outboundQueue = Buffer.alloc(0);
                 fillerPlaying = false;
               }
 
               // 2. Push to pacing queue and start playing at a constant rate (avoids jitter and breaking)
-              for (let i = 0; i < pcm16k.length; i++) {
-                outboundQueue.push(pcm16k[i]);
-              }
+              outboundQueue = outboundQueue.length ? Buffer.concat([outboundQueue, pcm16k]) : pcm16k;
               startPacing();
 
               // Save to recording file
@@ -1646,7 +1736,7 @@ async function openGeminiSession(vobizWs, voiceName, systemPrompt, recordStream,
             const filler = FILLER_CLIPS[voiceName];
             if (!filler || !vobizWs || vobizWs.readyState !== 1) return;
             fillerPlaying = true;
-            for (let i = 0; i < filler.length; i++) outboundQueue.push(filler[i]);
+            outboundQueue = outboundQueue.length ? Buffer.concat([outboundQueue, filler]) : filler;
             startPacing();
             log.info(`🫧 Filler played while awaiting real reply (voice: ${voiceName})`);
           }, FILLER_DEBOUNCE_MS);
