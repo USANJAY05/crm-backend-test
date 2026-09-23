@@ -717,6 +717,26 @@ async function handleVobizSession(vobizWs, streamContext = null) {
           let knowledgeBaseSearchEnabled = false;
           let preloadedQuestions = genericFallbackQuestions;
 
+          // Start tenant-scoped Gemini client and feature-flag resolution immediately
+          // after the Vobiz start event. These operations do not depend on the final
+          // prompt, so running them here hides their network latency behind the
+          // questionnaire / org / knowledge-base setup work below.
+          const startupT0 = Date.now();
+          const prewarmedGeminiClientPromise = genai.getClientForOrg(resolvedOrgId).catch((err) => {
+            log.warn(`⚠️ Vobiz Gemini client pre-warm failed; falling back during connect: ${err.message}`);
+            return null;
+          });
+          const prewarmedFeatureFlagsPromise = Promise.all([
+            featureFlags.isEnabled("knowledge_base_search"),
+            featureFlags.isEnabled("email_documents"),
+            featureFlags.isEnabled("whatsapp_channel"),
+            featureFlags.isEnabled("ai_auto_hangup"),
+          ]).catch((err) => {
+            log.warn(`⚠️ Vobiz feature-flag pre-warm failed; falling back during connect: ${err.message}`);
+            return null;
+          });
+          log.debug(`⏱️ Vobiz startup pre-warm launched at +${Date.now() - startupT0}ms after start handler entered`);
+
           const explicitAgentId = sanitizedCallee ? vobizCallAgentId.get(sanitizedCallee) : null;
           if (explicitAgentId) vobizCallAgentId.delete(sanitizedCallee);
 
@@ -1143,7 +1163,7 @@ If the tool result has 'deferred: true', tell the caller their personalized quot
 
 // GEMINI LIVE SESSION
 // ──────────═════════════════════
-async function openGeminiSession(vobizWs, voiceName, systemPrompt, recordStream, transcriptLines, callId, getStreamId, onTokenUsage, onAudioOut, onSetupComplete, getCallerNumber, customToolDeclarations = [], orgId = null, customObjects = [], getVobizCallId = null, resumeHandle = null, onResumptionHandle, onDisconnect, kbDocumentIds = null, normalizedQuestions = []) {
+async function openGeminiSession(vobizWs, voiceName, systemPrompt, recordStream, transcriptLines, callId, getStreamId, onTokenUsage, onAudioOut, onSetupComplete, getCallerNumber, customToolDeclarations = [], orgId = null, customObjects = [], getVobizCallId = null, resumeHandle = null, onResumptionHandle, onDisconnect, kbDocumentIds = null, normalizedQuestions = [], prewarmedDeps = null) {
   let loggedSampleServerContent = 0; // diagnostic-only counter, see onmessage below
 
   // Contact capture state (used when Gemini doesn't fire a toolCall) — was
@@ -1201,9 +1221,9 @@ async function openGeminiSession(vobizWs, voiceName, systemPrompt, recordStream,
   // small gap between chunks let the queue run dry mid-sentence, and this
   // pacer silently skipped that tick instead of waiting, which is exactly
   // what a caller hears as stuttering/broken-up speech. A small one-time
-  // pre-buffer per utterance absorbs that jitter; ~80ms is well under
+  // pre-buffer per utterance absorbs that jitter; ~40ms keeps startup responsive while
   // human perception for added delay.
-  const PREBUFFER_BYTES = 2560; // 80ms of 16kHz PCM16 (640 bytes = 20ms)
+  const PREBUFFER_BYTES = 1280; // 40ms of 16kHz PCM16 (640 bytes = 20ms)
   let hasPrebuffered = false;
 
   const startPacing = () => {
@@ -1305,12 +1325,18 @@ async function openGeminiSession(vobizWs, voiceName, systemPrompt, recordStream,
     return originalSend.call(this, data, options, callback);
   };
 
-  const [vobizKbEnabled, vobizEmailEnabled, vobizWhatsappEnabled, vobizAutoHangupEnabled] = await Promise.all([
+  // Prefer work started at Vobiz stream start. If pre-warming was unavailable
+  // (inbound call, cache miss, or a transient failure), retain the original
+  // on-demand behavior.
+  const featureFlagPromise = prewarmedDeps?.prewarmedFeatureFlagsPromise || Promise.all([
     featureFlags.isEnabled("knowledge_base_search"),
     featureFlags.isEnabled("email_documents"),
     featureFlags.isEnabled("whatsapp_channel"),
     featureFlags.isEnabled("ai_auto_hangup"),
   ]);
+  const geminiClientPromise = prewarmedDeps?.prewarmedGeminiClientPromise || genai.getClientForOrg(orgId);
+  const [vobizKbEnabled, vobizEmailEnabled, vobizWhatsappEnabled, vobizAutoHangupEnabled] =
+    await featureFlagPromise;
 
   const modelName = "gemini-live-2.5-flash-native-audio";
 
@@ -1339,9 +1365,11 @@ async function openGeminiSession(vobizWs, voiceName, systemPrompt, recordStream,
       provider: "vobiz",
       model: modelName,
     }),
-    genai.getClientForOrg(orgId),
+    geminiClientPromise,
   ]);
 
+  const geminiConnectStartedAt = Date.now();
+  log.info(`⏱️ Vobiz Gemini connect starting (pre-warmed client=${Boolean(prewarmedDeps?.prewarmedGeminiClientPromise)})`);
   const session = await geminiClient.live.connect({
     model: modelName,
     config: {
