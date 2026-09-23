@@ -54,7 +54,7 @@ function getModel(orgId = null) {
 }
 
 async function getModelForOrg(orgId = null) {
-  if (!genai.isVertex) return getModel(null);
+  if (!orgId) return getModel(null);
   const client = await genai.getClientForOrg(orgId);
   const projectKey = client.projectId;
   const credentialKey = client.runtimeCredentialFingerprint || "unknown";
