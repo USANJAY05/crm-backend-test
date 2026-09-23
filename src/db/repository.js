@@ -1796,4 +1796,9 @@ module.exports = {
   setAgentActive,
   getAgentForNumber,
   listNumbersWithAgent,
+  // Resolves once CREATE TABLE/ALTER TABLE/CREATE INDEX schema migration
+  // has finished (see src/db/adapters/mysql.js's createTables()) — used
+  // by src/scheduler/localScheduler.js to hold off registering any cron
+  // schedule until the database is actually ready.
+  ready: supabase.ready,
 };

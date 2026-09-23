@@ -14,8 +14,25 @@ describe("db.claimAutoDialLead", () => {
   // assertions, so getConnection() here hands out a fresh, independent
   // connection each call — claimAutoDialLead's own pool.connect() call
   // gets one nobody else ever touches.
+  //
+  // createTables() also GET_LOCKs before running any DDL (see
+  // tests/mysqlSchemaMigrationLock.test.js) — a generic mock that returns
+  // empty rows for every query would make that lock look un-acquired,
+  // rejecting the module's top-level `ready` promise with nothing in this
+  // file ever awaiting it, which surfaces as an unhandled rejection and
+  // can crash the whole Jest run. Answering GET_LOCK realistically here
+  // keeps that unrelated migration traffic a harmless no-op, same as it
+  // was before the lock existed.
   function mockMakeConnection() {
-    const conn = { query: jest.fn().mockResolvedValue([[], undefined]), release: jest.fn() };
+    const conn = {
+      query: jest.fn((sql) => {
+        if (typeof sql === "string" && sql.includes("GET_LOCK")) {
+          return Promise.resolve([[{ acquired: 1 }], undefined]);
+        }
+        return Promise.resolve([[], undefined]);
+      }),
+      release: jest.fn(),
+    };
     connections.push(conn);
     return conn;
   }

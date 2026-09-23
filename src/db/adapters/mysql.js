@@ -577,9 +577,58 @@ function isExpectedAlreadyExistsError(err) {
   ].includes(err?.code);
 }
 
+// app and scheduler are separate processes/containers that both require
+// this module independently — without coordination, both would run the
+// CREATE TABLE/ALTER TABLE/CREATE INDEX/ADD CONSTRAINT/feature-flag-UPDATE
+// sequence below concurrently on separate connections, which produced a
+// real "Deadlock found when trying to get lock" in production (MDL
+// contention on ADD CONSTRAINT FOREIGN KEY, since nearly every tenant
+// table's FK references `organizations`, plus row locks from the
+// feature-flag UPDATEs). MySQL's GET_LOCK()/RELEASE_LOCK() is an
+// advisory lock scoped to the single connection that acquired it — it is
+// NOT tied to a transaction and is NOT released by COMMIT, only by
+// RELEASE_LOCK(), the connection closing, or the session ending. That
+// means GET_LOCK, every statement in the body below, and RELEASE_LOCK
+// must all run on the exact same connection object (`client`), which is
+// why the lock is acquired and released here rather than via a separate
+// pool.query() call.
+const SCHEMA_MIGRATION_LOCK_NAME = "chiefvoice_schema_migration";
+const SCHEMA_MIGRATION_LOCK_TIMEOUT_SECONDS = 60;
+
 async function createTables() {
   const client = await pool.connect();
   try {
+    const lockResult = await client.query(
+      `SELECT GET_LOCK(?, ?) AS acquired`,
+      [SCHEMA_MIGRATION_LOCK_NAME, SCHEMA_MIGRATION_LOCK_TIMEOUT_SECONDS]
+    );
+    // GET_LOCK returns 1 on success, 0 on timeout, NULL on error (e.g. the
+    // session was killed while waiting). Only 1 means this connection may
+    // safely proceed; anything else must abort rather than race whichever
+    // process still holds — or almost holds — the lock.
+    if (lockResult.rows?.[0]?.acquired !== 1) {
+      throw new Error(
+        `[mysqlClient] could not acquire schema migration lock "${SCHEMA_MIGRATION_LOCK_NAME}" within ${SCHEMA_MIGRATION_LOCK_TIMEOUT_SECONDS}s — another process may be stuck holding it`
+      );
+    }
+    try {
+      await runSchemaMigration(client);
+    } finally {
+      // Always attempt release, including when runSchemaMigration threw —
+      // an unreleased advisory lock would otherwise wedge every future
+      // boot (app and scheduler alike) until this connection's session
+      // ends. A failure to release is logged, not thrown, so the
+      // original migration error (if any) is what callers see.
+      try {
+        await client.query(`SELECT RELEASE_LOCK(?)`, [SCHEMA_MIGRATION_LOCK_NAME]);
+      } catch (releaseErr) {
+        log.error(`[mysqlClient] failed to release schema migration lock: ${releaseErr.message}`);
+      }
+    }
+  } finally { client.release(); }
+}
+
+async function runSchemaMigration(client) {
     for (const [table, def] of Object.entries(TABLES)) {
       const cols = Object.entries(def.columns)
         .map(([col, type]) => `${q(col)} ${sqlType(type, col, col === def.pk)}${col === def.pk ? " PRIMARY KEY" : ""}`)
@@ -746,7 +795,6 @@ async function createTables() {
         throw new Error(`[mysqlClient] feature flag backfill failed for "${flagKey}": ${err.message}`, { cause: err });
       }
     }
-  } finally { client.release(); }
 }
 const ready = createTables().catch((err) => {
   log.error("[mysqlClient] failed to initialize schema:", err.message);
