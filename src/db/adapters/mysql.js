@@ -114,7 +114,7 @@ const TABLES = {
   leads: {
     pk: "id",
     columns: {
-      id: "text", org_id: "text", name: "text", phone: "text", email: "text",
+      id: "text", org_id: "text", name: "text", phone: "text", email: "text", gender: "text",
       amount_requested: "real", score: "int", source: "text", status: "text",
       tags: "array", notes: "text", financial_info: "json", group_ids: "array",
       // Universal contact -> campaign -> lead -> opportunity -> client

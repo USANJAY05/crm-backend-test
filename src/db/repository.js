@@ -37,7 +37,7 @@ const ENTITIES = {
   leads: {
     table: "leads",
     fields: {
-      id: "id", name: "name", phone: "phone", email: "email",
+      id: "id", name: "name", phone: "phone", email: "email", gender: "gender",
       amountRequested: "amount_requested", score: "score", source: "source",
       status: "status", tags: "tags", notes: "notes",
       financialInfo: "financial_info", groupIds: "group_ids",
