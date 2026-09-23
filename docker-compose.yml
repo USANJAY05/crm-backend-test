@@ -27,7 +27,7 @@ services:
       DB_ADAPTER: mysql
       MYSQL_HOST: mysql
       MYSQL_PORT: 3306
-      QUEUE_PROVIDER: ${QUEUE_PROVIDER:-memory}
+      QUEUE_PROVIDER: ${QUEUE_PROVIDER:-rabbitmq}
       RABBITMQ_URL: ${RABBITMQ_URL:-amqp://${RABBITMQ_USER}:${RABBITMQ_PASSWORD}@rabbitmq:5672}
       REDIS_HOST: redis
       REDIS_PORT: 6379
@@ -56,7 +56,7 @@ services:
     environment:
       NODE_ENV: ${NODE_ENV:-production}
       SCHEDULER_PROVIDER: ${SCHEDULER_PROVIDER:-local}
-      QUEUE_PROVIDER: ${QUEUE_PROVIDER:-memory}
+      QUEUE_PROVIDER: ${QUEUE_PROVIDER:-rabbitmq}
       RABBITMQ_URL: ${RABBITMQ_URL:-amqp://${RABBITMQ_USER}:${RABBITMQ_PASSWORD}@rabbitmq:5672}
       REDIS_HOST: redis
       REDIS_PORT: 6379
