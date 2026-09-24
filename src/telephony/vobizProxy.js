@@ -1246,6 +1246,7 @@ If the tool result has 'deferred: true', tell the caller their personalized quot
     vobizCallAttemptNumber.delete(callId);
     const retryContext = vobizCallRetryContext.get(callId) || null;
     vobizCallRetryContext.delete(callId);
+    const billingReservationId = retryContext?.billingReservationId || null;
     const direction = vobizCallDirection.get(callId) || "unknown";
     vobizCallDirection.delete(callId);
     vobizCallFinalizers.unregister(callId);
@@ -1304,6 +1305,7 @@ If the tool result has 'deferred: true', tell the caller their personalized quot
 
     postCallQueue.enqueue("finalizeCall:vobiz", {
       callId: generatedCallId, callerNumber, recordingUrl, durationSeconds: duration,
+      billingReservationId,
       transcriptLines, activeConfig, liveInputTokens, liveOutputTokens,
       totalInboundAudioBytes, totalOutboundAudioBytes, orgId, direction,
       isMachineDetected, attemptNumber, retryContext, sanitizedCallee: sanitizedCalleeForFinalize,
