@@ -205,6 +205,10 @@ const TABLES = {
       // config, not the org's generic default questionnaire, otherwise a
       // campaign's custom questions get silently swapped out on redial.
       retry_context: "json",
+      // Lease timestamp for durable retry claims. If the scheduler dies after
+      // claiming a callback but before dispatching it, a later scheduler can
+      // safely reclaim the row after the lease expires.
+      retry_claimed_at: "text",
       created_at: "text",
       // The telephony provider's own call id for this call (Vobiz
       // CallUUID / Twilio CallSid / Piopiy call id) — lets autoDialEngine.js
@@ -572,6 +576,7 @@ const VARCHAR_COLUMNS = new Map([
   // resolve to a bounded type instead of the LONGTEXT default.
   ["created_at", "VARCHAR(64)"],
   ["next_retry_at", "VARCHAR(64)"],
+  ["retry_claimed_at", "VARCHAR(64)"],
   ["next_dial_at", "VARCHAR(64)"],
   ["last_message_at", "VARCHAR(64)"],
   ["conversation_id", "VARCHAR(191)"],
@@ -737,6 +742,7 @@ async function runSchemaMigration(client) {
       ["idx_call_logs_org_created", "call_logs", ["org_id", "created_at"]],
       ["idx_call_logs_org_retry_due", "call_logs", ["org_id", "retry_status", "next_retry_at"]],
       ["idx_call_logs_org_status_retry_due", "call_logs", ["org_id", "status", "retry_status", "next_retry_at"]],
+      ["idx_call_logs_retry_claim_lease", "call_logs", ["retry_status", "retry_claimed_at"]],
       ["idx_call_logs_provider_sid", "call_logs", ["provider_call_sid"]],
       ["idx_dialer_tasks_org_due", "dialer_tasks", ["org_id", "auto_dial_enabled", "next_dial_at"]],
       ["idx_dialer_tasks_provider_sid", "dialer_tasks", ["current_provider_call_sid"]],

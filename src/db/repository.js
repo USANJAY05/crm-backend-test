@@ -95,6 +95,7 @@ const ENTITIES = {
       direction: "direction", createdAt: "created_at",
       attemptNumber: "attempt_number", nextRetryAt: "next_retry_at", retryStatus: "retry_status",
       retryContext: "retry_context",
+      retryClaimedAt: "retry_claimed_at",
       // The originating telephony provider's own call id (Vobiz CallUUID /
       // Twilio CallSid / Piopiy call id) — set by callFinalizer.js. Lets a
       // background process (autoDialEngine.js) recognize "this specific
@@ -840,9 +841,9 @@ const MAX_RETRY_ATTEMPTS = 3;
 const RETRY_DELAY_MS = 30 * 60 * 1000; // 30 minutes
 function computeRetryFields(attemptNumber) {
   if (attemptNumber >= MAX_RETRY_ATTEMPTS) {
-    return { attemptNumber, retryStatus: "exhausted", nextRetryAt: null };
+    return { attemptNumber, retryStatus: "exhausted", nextRetryAt: null, retryClaimedAt: null };
   }
-  return { attemptNumber, retryStatus: "pending", nextRetryAt: new Date(Date.now() + RETRY_DELAY_MS).toISOString() };
+  return { attemptNumber, retryStatus: "pending", nextRetryAt: new Date(Date.now() + RETRY_DELAY_MS).toISOString(), retryClaimedAt: null };
 }
 
 // Org-scoped view of which phone numbers currently have an auto-redial in
@@ -929,17 +930,29 @@ async function claimAutoDialLead(orgId, taskId, leadId) {
   } finally { client.release(); }
 }
 
+async function recoverStaleRetryClaims() {
+  const cutoff = new Date(Date.now() - Number(process.env.DIALER_RETRY_CLAIM_LEASE_MS || 10 * 60 * 1000)).toISOString();
+  const { data, error } = await supabase
+    .from("call_logs")
+    .update({ retry_status: "pending", retry_claimed_at: null })
+    .eq("retry_status", "retrying")
+    .lte("retry_claimed_at", cutoff)
+    .select("id, org_id");
+  if (error) throw new Error(`[db.recoverStaleRetryClaims] ${error.message}`);
+  return (data || []).length;
+}
+
 async function claimCallForRetry(orgId, rowId) {
   const nowIso = new Date().toISOString();
   const client = await _pool.connect();
   try {
-    const updateResult = await client.query(`UPDATE call_logs AS c SET retry_status = 'retrying'
+    const updateResult = await client.query(`UPDATE call_logs AS c SET retry_status = 'retrying', retry_claimed_at = $4
       WHERE c.id = $2 AND c.org_id = $1 AND c.retry_status = 'pending'
       AND c.next_retry_at <= $3
       AND c.status IN ('No Answer','Answering Machine','Callback Scheduled')
       AND NOT EXISTS (SELECT 1 FROM call_logs AS newer WHERE newer.org_id = c.org_id AND newer.id <> c.id
         AND newer.created_at > c.created_at
-        AND REGEXP_REPLACE(COALESCE(newer.caller_number,newer.lead_name,''),'[^0-9]','') = REGEXP_REPLACE(COALESCE(c.caller_number,c.lead_name,''),'[^0-9]',''))`, [orgId, rowId, nowIso]);
+        AND REGEXP_REPLACE(COALESCE(newer.caller_number,newer.lead_name,''),'[^0-9]','') = REGEXP_REPLACE(COALESCE(c.caller_number,c.lead_name,''),'[^0-9]',''))`, [orgId, rowId, nowIso, nowIso]);
     // Compare-and-set semantics: exactly one worker can transition pending -> retrying.
     if (Number(updateResult.affectedRows || updateResult.rowCount || 0) !== 1) return null;
     const { rows } = await client.query(`SELECT * FROM call_logs WHERE id = $1 AND org_id = $2 AND retry_status = 'retrying'`, [rowId, orgId]);
@@ -1760,6 +1773,7 @@ module.exports = {
   getCallsDueForRetry,
   claimAutoDialLead,
   claimCallForRetry,
+  recoverStaleRetryClaims,
   getScheduledCallbacks,
   getRetryStatusForOrg,
   hasNewerCallForPhone,
@@ -1804,5 +1818,5 @@ module.exports = {
   // by src/scheduler/localScheduler.js to hold off registering any cron
   // schedule until the database is actually ready.
   ready: supabase.ready,
-  pool: _pool,
+  pool: _pool
 };

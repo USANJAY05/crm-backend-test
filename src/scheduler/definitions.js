@@ -1,5 +1,9 @@
 // Central schedule registry. Business logic does not own timers.
-// Each definition maps a stable schedule id to a handler function.
+//
+// Schedules are intentionally split by responsibility:
+// - schedules: VM-local operational schedules such as auto-dial.
+// - callbackSchedules: durable callback/retry dispatch. This gets its own
+//   container today and can be replaced by EventBridge Scheduler tomorrow.
 const schedules = [
   {
     id: "crm-auto-dial",
@@ -9,9 +13,12 @@ const schedules = [
       await processAutoDialTasks();
     },
   },
+];
+
+const callbackSchedules = [
   {
     id: "crm-dialer-retry",
-    expression: process.env.DIALER_RETRY_SCHEDULE || "*/5 * * * *",
+    expression: process.env.CALLBACK_SCHEDULER_SCHEDULE || process.env.DIALER_RETRY_SCHEDULE || "* * * * *",
     run: async () => {
       const { processDueRetries } = require("../crm/dialerRetryEngine");
       await processDueRetries();
@@ -19,4 +26,4 @@ const schedules = [
   },
 ];
 
-module.exports = { schedules };
+module.exports = { schedules, callbackSchedules };

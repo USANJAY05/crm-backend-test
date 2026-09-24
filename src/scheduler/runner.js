@@ -1,13 +1,13 @@
 "use strict";
 
-const { schedules } = require("./definitions");
+const { schedules, callbackSchedules } = require("./definitions");
 const { getLogger } = require("../observability/logger");
 const log = getLogger("scheduler.runner");
 
 const running = new Set();
 
 function getSchedule(id) {
-  return schedules.find((item) => item.id === id) || null;
+  return [...schedules, ...callbackSchedules].find((item) => item.id === id) || null;
 }
 
 async function runSchedule(id) {
@@ -36,7 +36,11 @@ async function runSchedule(id) {
 }
 
 function listSchedules() {
-  return schedules.map(({ id, expression }) => ({ id, expression }));
+  return schedules.map(({ id, expression }) => ({ id, expression, kind: "operational" }));
 }
 
-module.exports = { getSchedule, runSchedule, listSchedules };
+function listCallbackSchedules() {
+  return callbackSchedules.map(({ id, expression }) => ({ id, expression, kind: "callback" }));
+}
+
+module.exports = { getSchedule, runSchedule, listSchedules, listCallbackSchedules };
