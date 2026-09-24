@@ -193,6 +193,19 @@ router.post("/dialer-tasks/:id/auto-dial/start", requireAuth, async (req, res) =
 
     const updated = await db.patch("dialertasks", req.orgId, req.params.id, patch);
     log.info(`🤖 Auto-dial started for task "${task.name}" (org ${req.orgId})`);
+
+    // Do not wait for the scheduler's next 15-second tick for the first call.
+    // The scheduler remains responsible for the continuous campaign loop, but
+    // the explicit Start Campaign action should immediately hand the task to
+    // the same auto-dial engine. This also makes the first dial resilient to
+    // a scheduler container being briefly unavailable during a deployment.
+    setImmediate(() => {
+      const { processAutoDialTasks } = require("../crm/autoDialEngine");
+      processAutoDialTasks().catch((err) => {
+        log.error(`❌ Immediate auto-dial dispatch failed for task ${req.params.id}:`, err.message);
+      });
+    });
+
     res.json(updated);
   } catch (err) { res.status(500).json({ error: safeErrorMessage(err) }); }
 });
