@@ -1,7 +1,7 @@
 {
   "name": "chiefvoice-crm-backend",
   "version": "1.0.0",
-  "description": "ChiefVoice CRM backend \u2014 Express API with MySQL data store and S3-compatible call recording storage.",
+  "description": "ChiefVoice CRM backend — Express API with MySQL data store and S3-compatible call recording storage.",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
@@ -9,7 +9,8 @@
     "test": "jest --testPathPatterns=tests/ --forceExit",
     "migrate:channel-credentials": "node scripts/migrate-channel-credentials.js",
     "test:mysql": "MYSQL_INTEGRATION_TESTS=1 jest tests/mysqlIntegration.test.js --runInBand --forceExit",
-    "check:deps": "node scripts/check-dependency-lock.js"
+    "check:deps": "node scripts/check-dependency-lock.js",
+    "start:callback-scheduler": "node callback-scheduler.js"
   },
   "jest": {
     "testEnvironment": "node",
