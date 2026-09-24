@@ -7,6 +7,10 @@ const { getLogger } = require("./src/observability/logger");
 
 validateRuntimeConfig(process.env, { mode: "scheduler" });
 const log = getLogger("callback-scheduler.entrypoint");
+const provider = String(process.env.SCHEDULER_PROVIDER || "local").toLowerCase();
+if (provider !== "local") {
+  throw new Error(`[callback-scheduler] provider "${provider}" is managed externally; use the provider-specific trigger instead of starting this local container.`);
+}
 
 const schedules = listCallbackSchedules();
 if (schedules.length !== 1 || schedules[0].id !== "crm-dialer-retry") {
