@@ -144,7 +144,7 @@ services:
       test:
         [
           "CMD-SHELL",
-          "mysqladmin ping -h localhost -u root -p$\${MYSQL_ROOT_PASSWORD} --silent"
+          "mysqladmin ping -h localhost -u root -p${MYSQL_ROOT_PASSWORD} --silent"
         ]
       interval: 10s
       timeout: 5s
