@@ -296,13 +296,33 @@ async function upsertCostProvider(actor, input) {
 }
 
 async function getFeatureFlags() {
-  return featureFlags.listFlags();
+  return featureFlags.listAllFlags();
 }
 
 async function updateFeatureFlag(actor, flag, enabled) {
-  await featureFlags.setEnabled(flag, enabled);
+  if (featureFlags.APP_FEATURE_DEFINITIONS[flag]) {
+    await featureFlags.setAppFeatureEnabled(flag, enabled);
+  } else {
+    await featureFlags.setEnabled(flag, enabled);
+  }
   await auditLog.record(null, actor, "platform.feature.update", "feature_flag", flag, { enabled: !!enabled });
-  return { key: flag, enabled: !!enabled };
+  return { key: flag, enabled: !!enabled, globallyEnabled: !!enabled };
+}
+
+async function getFeatureGroups() {
+  return featureFlags.getFeatureGroups();
+}
+
+async function saveFeatureGroup(group) {
+  return featureFlags.upsertFeatureGroup(group);
+}
+
+async function deleteFeatureGroup(key) {
+  return featureFlags.deleteFeatureGroup(key);
+}
+
+async function sanitizeFeatureKeys(keys) {
+  return featureFlags.sanitizeFeatureKeys(keys);
 }
 
 // Hard-deletes an organization and all of its data across every table.
@@ -344,4 +364,5 @@ module.exports = {
   listOrganizations, listUsers, listAuditLog, getStats, getTimeSeries, getOrganizationDetail,
   getPricing, updatePricing, getFeatureFlags, updateFeatureFlag, deleteOrganization,
   listCostProviders, upsertCostProvider, listCostArchive,
+  getFeatureGroups, saveFeatureGroup, deleteFeatureGroup, sanitizeFeatureKeys,
 };
