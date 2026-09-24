@@ -364,6 +364,18 @@ async function handlePlaceDialJob(data) {
       baseUrl, questions, language, from, agentId, starhealthEnabled, taskId, leadId,
     });
 
+    // The provider can answer/hang up very quickly. The finalizer may have
+    // already completed this lead while triggerOutboundCall was returning.
+    // Re-read the task before publishing the provider SID so a completed
+    // final call cannot resurrect the task's in-flight lease and cause the
+    // auto-dial loop to continue after the campaign is actually finished.
+    const tasksAfterDial = await db.list("dialertasks", orgId);
+    const taskAfterDial = tasksAfterDial.find((t) => t.id === taskId);
+    if (!taskAfterDial || !taskAfterDial.autoDialEnabled || taskAfterDial.currentLeadId !== leadId) {
+      log.info(`🤖 [autoDialEngine] Call for lead ${leadId} completed/stopped before placement state could be committed; not resurrecting task ${taskId}.`);
+      return;
+    }
+
     await db.patch("dialertasks", orgId, taskId, { currentProviderCallSid: result.callSid, currentProvider: provider });
     if (global.broadcastLog) {
       global.broadcastLog(`🤖 Auto-dial: calling ${leadName || leadPhone} for task "${taskName}"`, {
