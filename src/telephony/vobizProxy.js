@@ -776,10 +776,16 @@ async function handleVobizSession(vobizWs, streamContext = null) {
           // who's calling and why instead, and ask if now's a good time.
           const callDirection = vobizCallDirection.get(callId) || "inbound";
           const greetingAddressee = callerContactName ? `${callerContactName} sir/mam` : "sir/mam";
+          // Keep the first turn intentionally short. Long opening prompts add
+          // noticeable TTFB because Gemini has to generate the whole greeting
+          // before the first audio chunk. The caller can answer the question
+          // and the normal conversation prompt takes over immediately.
           const greetingText = callDirection === "outbound"
-            ? `Vanakkam ${greetingAddressee}! Good ${timeOfDay}. Naanga ${orgName}-la irundhu call panrom. Ungaluku ippo konjam neram pesalama?`
-            : `Vanakkam ${greetingAddressee}! Good ${timeOfDay}. Neenga ${orgName}-ku call panniirukkinga. Sollunga, enna assist venum, epdi help pannalam?`;
+            ? `Vanakkam ${greetingAddressee}! Naanga ${orgName}-la irundhu call panrom. Ippo pesalama?`
+            : `Vanakkam ${greetingAddressee}! Sollunga, epdi help pannalam?`;
+          const greetingStartedAt = Date.now();
           await geminiSession.sendText(greetingText);
+          log.info(`⏱️ Initial greeting request sent in ${Date.now() - greetingStartedAt}ms [call=${callId}]`);
         } catch (e) {
           log.error("Failed to trigger initial greeting:", e.message);
         }
@@ -1583,6 +1589,16 @@ async function openGeminiSession(vobizWs, voiceName, systemPrompt, recordStream,
         parts: [{ text: systemPrompt }]
       },
       responseModalities: ["AUDIO"],
+
+      // Zero thinking on the first response is important for telephony UX.
+      // The native-audio model can otherwise spend extra time reasoning before
+      // emitting its first audio chunk. Keep the voice turn conversational;
+      // business/tool work can still happen after the caller responds.
+      generationConfig: {
+        temperature: 0.7,
+        thinkingConfig: { thinkingBudget: 0 },
+      },
+
       tools: [
         {
           functionDeclarations: [
