@@ -181,8 +181,14 @@ router.post("/incoming", requireVobizWebhook, async (req, res) => {
   try { streamToken = createVobizStreamToken(CallUUID, streamOrgId); }
   catch (err) { log.error("❌ Failed to create secure Vobiz stream token:", err.message); return res.status(503).send("Unable to initialize secure media stream"); }
 
+  // Give the caller an immediate telephony-level acknowledgement while the
+  // Gemini Live WebSocket is establishing. The production trace shows the
+  // Gemini socket/setup path alone can take ~1.5s before the first model
+  // audio; this short VobizXML utterance removes that dead-air gap. The real
+  // Gemini greeting still follows once the stream is ready.
   res.send(`<?xml version="1.0" encoding="UTF-8"?>
 <Response>
+  <Speak>Vanakkam, one moment please.</Speak>
   <Stream bidirectional="true" keepCallAlive="true" contentType="audio/x-l16;rate=16000">wss://${req.headers.host}/${streamPath}?stream_token=${encodeURIComponent(streamToken)}</Stream>
 </Response>`);
 });
