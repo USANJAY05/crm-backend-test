@@ -122,11 +122,15 @@ services:
       DB_ADAPTER: mysql
       MYSQL_HOST: mysql
       MYSQL_PORT: 3306
+      QUEUE_PROVIDER: ${QUEUE_PROVIDER:-rabbitmq}
+      RABBITMQ_URL: ${RABBITMQ_URL:-amqp://${RABBITMQ_USER}:${RABBITMQ_PASSWORD}@rabbitmq:5672}
       REDIS_HOST: redis
       REDIS_PORT: 6379
       REDIS_URL: redis://redis:6379
     depends_on:
       mysql:
+        condition: service_healthy
+      rabbitmq:
         condition: service_healthy
     networks: [internal]
 
