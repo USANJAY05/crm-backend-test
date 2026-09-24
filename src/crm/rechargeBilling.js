@@ -166,7 +166,7 @@ async function releaseReservation(reservationId) {
   }
 }
 
-async function settleReservation({ reservationId, durationSeconds = 0 }) {
+async function settleReservation({ reservationId, durationSeconds = 0, aiCostInr = null }) {
   if (!reservationId) return null;
   const client = await db.pool.connect();
   try {
@@ -200,7 +200,8 @@ async function settleReservation({ reservationId, durationSeconds = 0 }) {
     ]);
 
     let actual = 0;
-    if (aiCost) actual += Number(aiCost.totalCost) || 0;
+    if (aiCostInr != null) actual += Number(aiCostInr) || 0;
+    else if (aiCost) actual += Number(aiCost.totalCost) || 0;
     if (callCost) actual += Number(callCost.totalCost) || 0;
     actual = money(actual);
 
@@ -271,7 +272,7 @@ async function getBillingState(orgId) {
   };
 }
 
-async function settleReservationForCall({ orgId, providerCallSid, durationSeconds }) {
+async function settleReservationForCall({ orgId, providerCallSid, durationSeconds, aiCostInr = null }) {
   if (!orgId || !providerCallSid) return null;
   const { data: rows } = await db.supabase
     .from("recharge_billing_reservations")
@@ -281,7 +282,7 @@ async function settleReservationForCall({ orgId, providerCallSid, durationSecond
     .limit(1);
   const id = rows?.[0]?.id;
   if (!id) return null;
-  return settleReservation({ reservationId: id, durationSeconds });
+  return settleReservation({ reservationId: id, durationSeconds, aiCostInr });
 }
 
 module.exports = {
