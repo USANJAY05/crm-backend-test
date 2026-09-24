@@ -11,7 +11,7 @@ const os = require("os");
 const crypto = require("crypto");
 const { execFile } = require("child_process");
 const { promisify } = require("util");
-const { GetObjectCommand } = require("@aws-sdk/client-s3");
+const { GetObjectCommand, ListObjectsV2Command } = require("@aws-sdk/client-s3");
 const db = require("../db/repository");
 const platformSettings = require("./settings");
 const storage = require("../storage");
@@ -369,6 +369,27 @@ async function updateBackupState(orgId, patch) {
   await db.updateOrg(orgId, { dataBackup: settings[BACKUP_KEY] });
 }
 
+async function purgeExpiredBackups(orgId, retentionDays) {
+  const cutoff = Date.now() - retentionDays * 86400000;
+  try {
+    const response = await getClient().send(new ListObjectsV2Command({
+      Bucket: process.env.STORAGE_BUCKET,
+      Prefix: `backups/${orgId}/`,
+    }));
+    let deleted = 0;
+    for (const object of response.Contents || []) {
+      if (object.LastModified && object.LastModified.getTime() < cutoff && object.Key) {
+        await storage.remove(object.Key);
+        deleted++;
+      }
+    }
+    return deleted;
+  } catch (err) {
+    log.warn(`[backup] Could not purge expired backups for ${orgId}: ${err.message}`);
+    return 0;
+  }
+}
+
 async function performBackup(org) {
   const settings = extractOrgSettings(org);
   const config = { ...BACKUP_DEFAULTS, ...(settings[BACKUP_KEY] || {}) };
@@ -390,6 +411,7 @@ async function performBackup(org) {
     const subject = `${org.name} — CRM backup ready`;
     const html = `<p>Your CRM backup for <strong>${org.name}</strong> is ready.</p><p>Size: ${Math.round(result.sizeBytes / 1024 / 1024 * 100) / 100} MB</p><p><a href="${result.downloadUrl}">Download backup</a> (link expires in 7 days).</p>`;
     await mailer.sendMail({ to: config.email, subject, html, text: `Your CRM backup for ${org.name} is ready. Download: ${result.downloadUrl}` });
+    await purgeExpiredBackups(org.id, config.retentionDays || 365);
     return result;
   } catch (err) {
     log.error(`[backup] ${org.id} failed: ${err.message}`);
