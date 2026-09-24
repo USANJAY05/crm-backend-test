@@ -520,12 +520,6 @@ async function triggerVobizOutboundCall(orgId, phoneNumber, { questions, from, l
   }
 
   let billingReservation = null;
-  try {
-    billingReservation = await rechargeBilling.authorizeOutboundCall(orgId, { providerKey: "vobiz" });
-  } catch (err) {
-    log.warn(`⚠️ Recharge billing blocked Vobiz call for org ${orgId}: ${err.message}`);
-    throw err;
-  }
 
   const ownChannel = await channelsEngine.getChannel(orgId, "vobiz").catch(() => null);
   const authId = ownChannel?.config?.authId;
@@ -537,6 +531,13 @@ async function triggerVobizOutboundCall(orgId, phoneNumber, { questions, from, l
   }
   if (!baseUrl) {
     throw new Error("No base URL available to build Vobiz callback URLs (PUBLIC_URL not configured).");
+  }
+
+  try {
+    billingReservation = await rechargeBilling.authorizeOutboundCall(orgId, { providerKey: "vobiz" });
+  } catch (err) {
+    log.warn(`⚠️ Recharge billing blocked Vobiz call for org ${orgId}: ${err.message}`);
+    throw err;
   }
 
   const webhookSecret = process.env.VOBIZ_WEBHOOK_SECRET;
@@ -554,7 +555,10 @@ async function triggerVobizOutboundCall(orgId, phoneNumber, { questions, from, l
 
   log.info(`📞 Triggering Vobiz outbound call to ${sanitizedTo} from ${sanitizedFrom} (attempt ${attemptNumber})...`);
 
-  const response = await fetch(`https://api.vobiz.ai/api/v1/Account/${authId}/Call/`, {
+  let response;
+  let data;
+  try {
+    response = await fetch(`https://api.vobiz.ai/api/v1/Account/${authId}/Call/`, {
     method: "POST",
     headers: { "X-Auth-ID": authId, "X-Auth-Token": authToken, "Content-Type": "application/json" },
     body: JSON.stringify({
