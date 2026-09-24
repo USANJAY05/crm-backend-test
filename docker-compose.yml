@@ -107,6 +107,29 @@ services:
         condition: service_healthy
     networks: [internal]
 
+  # Dedicated worker for organization data-retention cleanup and scheduled
+  # backup processing. It runs the retention cycle immediately at startup and
+  # then once daily at 03:00 server time.
+  retention-worker:
+    build: .
+    restart: unless-stopped
+    command: ["node", "retention-worker.js"]
+    env_file:
+      - path: .env
+        required: true
+    environment:
+      NODE_ENV: ${NODE_ENV:-production}
+      DB_ADAPTER: mysql
+      MYSQL_HOST: mysql
+      MYSQL_PORT: 3306
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_URL: redis://redis:6379
+    depends_on:
+      mysql:
+        condition: service_healthy
+    networks: [internal]
+
   mysql:
     image: mysql:8.4
     restart: unless-stopped
@@ -121,7 +144,7 @@ services:
       test:
         [
           "CMD-SHELL",
-          "mysqladmin ping -h localhost -u root -p$${MYSQL_ROOT_PASSWORD} --silent"
+          "mysqladmin ping -h localhost -u root -p$\${MYSQL_ROOT_PASSWORD} --silent"
         ]
       interval: 10s
       timeout: 5s
