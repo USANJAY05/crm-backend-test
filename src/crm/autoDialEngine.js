@@ -22,6 +22,7 @@ const db = require("../db/repository");
 const { getQueue } = require("../queue");
 const { getLogger } = require("../observability/logger");
 const log = getLogger("crm.autoDialEngine");
+const telephony = require("../telephony/registry");
 
 const INTER_CALL_DELAY_MS = 3 * 1000; // matches the frontend's prior pacing between one call ending and the next starting
 const STUCK_CALL_MAX_AGE_MS = 30 * 60 * 1000; // same bound as the 30-min Map TTLs triggerVobizOutboundCall itself uses
@@ -300,7 +301,7 @@ async function processTask(task) {
 
     const { provider, from, agentId } = await resolveProviderAndAgent(orgId, task);
 
-    if (provider !== "vobiz") {
+    if (!telephony.supportsOutbound(provider)) {
       log.error(`❌ [autoDialEngine] Task ${taskId} (org ${orgId}) — outbound number's provider ("${provider}") has no server-side dial support yet; pausing.`);
       await db.patch("dialertasks", orgId, taskId, {
         currentLeadId: null, currentCallStartedAt: null,
@@ -359,8 +360,7 @@ async function handlePlaceDialJob(data) {
       return;
     }
 
-    const { triggerVobizOutboundCall } = require("../telephony/vobizProxy");
-    const result = await triggerVobizOutboundCall(orgId, leadPhone, {
+    const result = await telephony.triggerOutboundCall(provider, orgId, leadPhone, {
       baseUrl, questions, language, from, agentId, starhealthEnabled, taskId, leadId,
     });
 
@@ -436,8 +436,8 @@ async function processAutoDialTasks() {
 async function forceHangupCurrentCall(task) {
   if (!task.currentProviderCallSid) return;
   try {
-    const { hangupVobizCall } = require("../telephony/vobizProxy");
-    await hangupVobizCall(task.currentProviderCallSid, task.orgId);
+    const provider = task.currentProvider || "vobiz";
+    await telephony.hangupCall(provider, task.currentProviderCallSid, task.orgId);
   } catch (err) {
     const message = String(err?.message || err || "");
     if (/call.*not found|not found.*call|does not exist|already.*ended|already.*hang/i.test(message)) {

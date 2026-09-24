@@ -8,10 +8,9 @@
 
 const { WebSocketServer } = require("ws");
 const { incrementSessions, decrementSessions } = require("../../shared");
-const { handleVobizSession } = require("../vobizProxy");
+const { handleVobizSession, verifyVobizStreamToken, triggerVobizOutboundCall, hangupVobizCall } = require("../vobizProxy");
 const { handleVobizSessionCascaded } = require("../vobizPipelineCascaded");
 const { getLogger } = require("../../observability/logger");
-const { verifyVobizStreamToken } = require("../vobizProxy");
 const log = getLogger("telephony.connectors.vobiz");
 
 // ── WebSocket servers ────────────────────────────────────────────────────────
@@ -75,5 +74,13 @@ module.exports = {
     const router = require("express").Router();
     router.use("/api/vobiz", require("../../routes/vobiz"));
     return router;
+  },
+
+  async triggerOutboundCall(orgId, phoneNumber, options = {}) {
+    return triggerVobizOutboundCall(orgId, phoneNumber, options);
+  },
+
+  async hangupCall(callSid, orgId) {
+    return hangupVobizCall(callSid, orgId);
   },
 };

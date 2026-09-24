@@ -596,7 +596,7 @@ async function triggerVobizOutboundCall(orgId, phoneNumber, { questions, from, l
       orgId,
       direction: "outbound",
       attemptNumber,
-      retryContext: { questions, from, language, assignedContact, taskId, leadId },
+      retryContext: { questions, from, language, assignedContact, taskId, leadId, provider: "vobiz" },
       fromNumber: sanitizedFrom,
       toNumber: sanitizedTo,
     }

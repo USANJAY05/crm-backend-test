@@ -47,10 +47,58 @@ function buildRouter() {
   return router;
 }
 
+function findConnector(name) {
+  if (!name) return null;
+  const direct = connectors.get(name);
+  if (direct) return direct;
+  const key = String(name).trim().toLowerCase();
+  for (const [slug, connector] of connectors.entries()) {
+    if (slug.toLowerCase() === key || (connector.label && connector.label.toLowerCase() === key)) {
+      return connector;
+    }
+    if (key.includes(slug.toLowerCase()) || slug.toLowerCase().includes(key)) {
+      return connector;
+    }
+  }
+  return null;
+}
+
+function supportsOutbound(providerName) {
+  const connector = findConnector(providerName);
+  return typeof connector?.triggerOutboundCall === "function";
+}
+
+async function triggerOutboundCall(providerName, orgId, phoneNumber, options = {}) {
+  const connector = findConnector(providerName);
+  if (!connector || typeof connector.triggerOutboundCall !== "function") {
+    throw new Error(`[telephony/registry] Telephony provider "${providerName}" is not registered or does not support outbound calls.`);
+  }
+  return connector.triggerOutboundCall(orgId, phoneNumber, options);
+}
+
+async function hangupCall(providerName, callSid, orgId) {
+  const connector = findConnector(providerName);
+  if (!connector || typeof connector.hangupCall !== "function") {
+    log.warn(`⚠️ [telephony/registry] Cannot hang up call ${callSid}: provider "${providerName}" has no hangupCall implementation.`);
+    return;
+  }
+  return connector.hangupCall(callSid, orgId);
+}
+
 // ── Register built-in connectors ─────────────────────────────────────────────
 // To add a new telephony provider: create src/telephony/connectors/<name>.js
 // and add a register() call here. Nothing else needs to change.
 register(require("./connectors/gemini"));
 register(require("./connectors/vobiz"));
 
-module.exports = { register, get, all, handleUpgrade, buildRouter };
+module.exports = {
+  register,
+  get,
+  all,
+  handleUpgrade,
+  buildRouter,
+  findConnector,
+  supportsOutbound,
+  triggerOutboundCall,
+  hangupCall,
+};

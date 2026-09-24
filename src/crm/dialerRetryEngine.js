@@ -118,6 +118,7 @@ async function processDueRetries() {
         // reached, but the dialer task's own Active Working List row
         // would stay stuck on "Callback Scheduled" forever.
         taskId: retryContext.taskId, leadId: retryContext.leadId,
+        provider: retryContext.provider || row.provider || "vobiz",
       });
     } catch (err) {
       log.error(`❌ [dialerRetryEngine] Auto-redial failed for ${row.leadName} (org ${row.orgId}):`, err.message);
@@ -135,10 +136,10 @@ async function processDueRetries() {
 // tracks toward MAX_RETRY_ATTEMPTS; a queue-level rethrow-and-retry would
 // just duplicate that with a different budget/backoff).
 async function handlePlaceRedialJob(data) {
-  const { orgId, rowId, dialTarget, leadName, baseUrl, attemptNumber, questions, from, language, assignedContact, taskId, leadId } = data;
+  const { orgId, rowId, dialTarget, leadName, baseUrl, attemptNumber, questions, from, language, assignedContact, taskId, leadId, provider = "vobiz" } = data;
   try {
-    const { triggerVobizOutboundCall } = require("../telephony/vobizProxy");
-    await triggerVobizOutboundCall(orgId, dialTarget, {
+    const telephony = require("../telephony/registry");
+    await telephony.triggerOutboundCall(provider, orgId, dialTarget, {
       baseUrl, attemptNumber, questions, from, language, assignedContact, taskId, leadId,
     });
     await db.patch("calllogs", orgId, rowId, { retryStatus: "retried" });
