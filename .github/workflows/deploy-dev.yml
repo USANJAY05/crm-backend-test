@@ -1,0 +1,63 @@
+name: Deploy Development VM
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  deploy:
+    name: Deploy to GCP VM
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+
+      - name: Set up gcloud
+        uses: google-github-actions/setup-gcloud@v3
+        with:
+          project_id: ${{ secrets.GCP_PROJECT_ID }}
+
+      - name: Deploy to VM
+        env:
+          GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+          GCP_VM_NAME: ${{ secrets.GCP_VM_NAME }}
+          GCP_VM_ZONE: ${{ secrets.GCP_VM_ZONE }}
+          VM_APP_DIR: ${{ secrets.VM_APP_DIR }}
+        run: |
+          gcloud compute ssh "$GCP_VM_NAME" \
+            --project="$GCP_PROJECT_ID" \
+            --zone="$GCP_VM_ZONE" \
+            --quiet \
+            --command="cd '$VM_APP_DIR' && git pull --ff-only origin main && docker compose build app && docker compose up -d app"
+
+      - name: Send deployment success email
+        if: success()
+        uses: dawidd6/action-send-mail@v6
+        with:
+          server_address: ${{ secrets.SMTP_HOST }}
+          server_port: ${{ secrets.SMTP_PORT }}
+          username: ${{ secrets.SMTP_USERNAME }}
+          password: ${{ secrets.SMTP_PASSWORD }}
+          from: ${{ secrets.SMTP_FROM }}
+          to: ${{ secrets.NOTIFY_EMAIL }}
+          subject: "CRM development deployment successful"
+          body: |
+            Deployment succeeded.
+
+            Repository: ${{ github.repository }}
+            Branch: ${{ github.ref_name }}
+            Commit: ${{ github.sha }}
+            VM: ${{ secrets.GCP_VM_NAME }}
+
+            Actions run:
+            https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
