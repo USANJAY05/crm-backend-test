@@ -1026,6 +1026,21 @@ async function getScheduledCallbacks(orgId) {
   });
 }
 
+// Cross-org pending retry scan used only by the durable callback scheduler.
+// MySQL remains the source of truth; BullMQ only stores durable wake-up jobs.
+async function getPendingRetriesForScheduler(limit = 5000) {
+  const safeLimit = Math.max(1, Math.min(Number(limit) || 5000, 10000));
+  const { data, error } = await supabase
+    .from("call_logs")
+    .select("*")
+    .in("status", ["Callback Scheduled", "No Answer", "Answering Machine"])
+    .eq("retry_status", "pending")
+    .order("next_retry_at", { ascending: true })
+    .limit(safeLimit);
+  if (error) throw new Error(`[db.getPendingRetriesForScheduler] ${error.message}`);
+  return (data || []).map((row) => fromDbRow("calllogs", row));
+}
+
 // Cross-org scan for dialer tasks currently in auto-dial mode — see
 // src/crm/autoDialEngine.js. Unscoped (no org_id filter), same rationale
 // as getCallsDueForRetry above: the engine runs on its own timer, not
@@ -1775,6 +1790,7 @@ module.exports = {
   claimCallForRetry,
   recoverStaleRetryClaims,
   getScheduledCallbacks,
+  getPendingRetriesForScheduler,
   getRetryStatusForOrg,
   hasNewerCallForPhone,
   getActiveAutoDialTasks,
