@@ -11,7 +11,9 @@ const CORE_FIELDS = {
   subscriptionPlan: "subscription_plan", aiMinutesUsed: "ai_minutes_used",
   aiMinutesLimit: "ai_minutes_limit", phoneCharges: "phone_charges",
   billingPeriodEnd: "billing_period_end", status: "status",
-  featureFlags: "feature_flags", createdAt: "created_at"
+  featureFlags: "feature_flags", createdAt: "created_at",
+  billingMethod: "billing_method", chargeScope: "charge_scope",
+  rechargeBalanceInr: "recharge_balance_inr", rechargeReservedInr: "recharge_reserved_inr"
 };
 
 function toApi(row) {
@@ -36,12 +38,16 @@ function split(apiObj) {
 
 async function createOrganizationSetup({
   name, workspaceName, industry, subscriptionPlan, featureFlags, adminEmail, adminName, gcpProject, callProvider,
+  billingMethod = "pay_as_you_go", chargeScope = "ai_only", initialRechargeAmountInr = 0,
 }) {
   const client = await pool.connect(); const orgId = crypto.randomUUID();
   const cloudProjectId = `orgcloud_${orgId}_vertex_ai`; const memberId = adminEmail ? crypto.randomUUID() : null; const now = new Date().toISOString();
   try {
     await client.query("BEGIN");
-    await client.query(`INSERT INTO organizations (id,name,workspace_name,industry,subscription_plan,feature_flags,created_at) VALUES ($1,$2,$3,$4,$5,$6,$7)`, [orgId,name,workspaceName,industry||"lending",subscriptionPlan||"Starter",JSON.stringify(featureFlags||[]),now]);
+    const normalizedBillingMethod = billingMethod === "recharge_based" ? "recharge_based" : "pay_as_you_go";
+    const normalizedChargeScope = chargeScope === "ai_and_call_provider" ? "ai_and_call_provider" : "ai_only";
+    const initialBalance = normalizedBillingMethod === "recharge_based" ? Math.max(0, Number(initialRechargeAmountInr) || 0) : 0;
+    await client.query(`INSERT INTO organizations (id,name,workspace_name,industry,subscription_plan,feature_flags,billing_method,charge_scope,recharge_balance_inr,recharge_reserved_inr,created_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`, [orgId,name,workspaceName,industry||"lending",subscriptionPlan||"Starter",JSON.stringify(featureFlags||[]),normalizedBillingMethod,normalizedChargeScope,initialBalance,0,now]);
     await client.query(`INSERT INTO organization_cloud_projects (id,organization_id,organization_name,provider,purpose,mode,project_id,project_number,location,credentials_encrypted,status,updated_at) VALUES ($1,$2,$3,'gcp','vertex-ai','existing',$4,$5,$6,$7,'ready',$8)`, [cloudProjectId,orgId,name,gcpProject.projectId,gcpProject.projectNumber||null,gcpProject.location||null,gcpProject.credentialsEncrypted||null,now]);
     if (callProvider) {
       await client.query(`INSERT INTO channels (id,org_id,type,external_id,config,credentials_encrypted,status,created_at) VALUES ($1,$2,$3,$4,$5,$6,'connected',$7) ON DUPLICATE KEY UPDATE external_id=VALUES(external_id),config=VALUES(config),credentials_encrypted=VALUES(credentials_encrypted),status=VALUES(status)`, [crypto.randomUUID(),orgId,callProvider.provider,callProvider.phoneNumber,JSON.stringify({phoneNumber:callProvider.phoneNumber}),encryptJson({authId:callProvider.authId,authToken:callProvider.authToken}),now]);
@@ -61,13 +67,17 @@ async function createOrganizationSetup({
   } catch(err){ try{await client.query("ROLLBACK");}catch(_){} throw err; } finally{client.release();}
 }
 
-async function create({ name, workspaceName, industry, subscriptionPlan, featureFlags }) {
+async function create({ name, workspaceName, industry, subscriptionPlan, featureFlags, billingMethod, chargeScope, initialRechargeAmountInr }) {
   const { data, error } = await supabase.from("organizations").insert({
     name,
     workspace_name: workspaceName,
     industry: industry || "lending",
     subscription_plan: subscriptionPlan || "Starter",
-    feature_flags: featureFlags || []
+    feature_flags: featureFlags || [],
+    billing_method: billingMethod === "recharge_based" ? "recharge_based" : "pay_as_you_go",
+    charge_scope: chargeScope === "ai_and_call_provider" ? "ai_and_call_provider" : "ai_only",
+    recharge_balance_inr: billingMethod === "recharge_based" ? Math.max(0, Number(initialRechargeAmountInr) || 0) : 0,
+    recharge_reserved_inr: 0
   }).select().single();
   if (error) throw new Error(`[organizationRepository.create] ${error.message}`);
   return toApi(data);

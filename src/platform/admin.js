@@ -52,6 +52,11 @@ async function listOrganizations() {
     memberCount: memberCounts[o.id] || 0,
     leadCount: leadCounts[o.id] || 0,
     createdAt: o.created_at,
+    billingMethod: o.billing_method || "pay_as_you_go",
+    chargeScope: o.charge_scope || "ai_only",
+    rechargeBalanceInr: Number(o.recharge_balance_inr) || 0,
+    rechargeReservedInr: Number(o.recharge_reserved_inr) || 0,
+    rechargeAvailableInr: Math.max(0, (Number(o.recharge_balance_inr) || 0) - (Number(o.recharge_reserved_inr) || 0)),
     gcpVertexProject: cloudByOrg[o.id] || null
   }));
 }
@@ -240,6 +245,11 @@ async function getOrganizationDetail(orgId) {
     totalCostInr: await costForMinutes(org.ai_minutes_used),
     billingPeriodEnd: org.billing_period_end,
     createdAt: org.created_at,
+    billingMethod: org.billing_method || "pay_as_you_go",
+    chargeScope: org.charge_scope || "ai_only",
+    rechargeBalanceInr: Number(org.recharge_balance_inr) || 0,
+    rechargeReservedInr: Number(org.recharge_reserved_inr) || 0,
+    rechargeAvailableInr: Math.max(0, (Number(org.recharge_balance_inr) || 0) - (Number(org.recharge_reserved_inr) || 0)),
     gcpVertexProject: await db.toApiOrgCloudProject(await db.getOrgCloudProject(orgId)),
     settings: org.settings || {},
     counts: { leads: leadCount || 0, workflows: workflowCount || 0, campaigns: campaignCount || 0, members: (members || []).length },

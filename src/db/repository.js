@@ -760,6 +760,9 @@ async function listOrgCloudProjectsByStatus(statuses) { return organizationRepos
 // same org this can under-count under a race. Acceptable for a first-cut
 // usage counter; a real billing system should use a MySQL RPC that does
 // `ai_minutes_used = ai_minutes_used + x` in one statement instead.
+// Shared raw pool for billing modules that need row-level transactions.
+// Exported intentionally so reservation/recharge operations can use the same
+// MySQL connection pool as the rest of the repository without a second pool.
 async function incrementAiMinutesUsed(orgId, seconds) {
   if (!orgId || !seconds) return;
   const minutes = seconds / 60;
@@ -1801,4 +1804,5 @@ module.exports = {
   // by src/scheduler/localScheduler.js to hold off registering any cron
   // schedule until the database is actually ready.
   ready: supabase.ready,
+  pool: _pool,
 };

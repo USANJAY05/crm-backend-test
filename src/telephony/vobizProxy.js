@@ -477,6 +477,7 @@ async function resolveVobizCallSetup(resolvedOrgId, calleeNumber, resolvedPhone,
 async function triggerVobizOutboundCall(orgId, phoneNumber, { questions, from, language, assignedContact, baseUrl, attemptNumber = 1, starhealthEnabled = false, agentId, taskId = null, leadId = null } = {}) {
   const channelsEngine = require("../channels/engine");
   const billingEngine = require("../crm/billingEngine");
+  const rechargeBilling = require("../crm/rechargeBilling");
   const complianceEngine = require("../crm/complianceEngine");
 
   let fromNumber = null;
@@ -518,6 +519,8 @@ async function triggerVobizOutboundCall(orgId, phoneNumber, { questions, from, l
     vobizCallAgentId.set(sanitizedNumber, agentId);
   }
 
+  let billingReservation = null;
+
   const ownChannel = await channelsEngine.getChannel(orgId, "vobiz").catch(() => null);
   const authId = ownChannel?.config?.authId;
   const authToken = ownChannel?.config?.authToken;
@@ -528,6 +531,13 @@ async function triggerVobizOutboundCall(orgId, phoneNumber, { questions, from, l
   }
   if (!baseUrl) {
     throw new Error("No base URL available to build Vobiz callback URLs (PUBLIC_URL not configured).");
+  }
+
+  try {
+    billingReservation = await rechargeBilling.authorizeOutboundCall(orgId, { providerKey: "vobiz" });
+  } catch (err) {
+    log.warn(`⚠️ Recharge billing blocked Vobiz call for org ${orgId}: ${err.message}`);
+    throw err;
   }
 
   const webhookSecret = process.env.VOBIZ_WEBHOOK_SECRET;
@@ -545,7 +555,10 @@ async function triggerVobizOutboundCall(orgId, phoneNumber, { questions, from, l
 
   log.info(`📞 Triggering Vobiz outbound call to ${sanitizedTo} from ${sanitizedFrom} (attempt ${attemptNumber})...`);
 
-  const response = await fetch(`https://api.vobiz.ai/api/v1/Account/${authId}/Call/`, {
+  let response;
+  let data;
+  try {
+    response = await fetch(`https://api.vobiz.ai/api/v1/Account/${authId}/Call/`, {
     method: "POST",
     headers: { "X-Auth-ID": authId, "X-Auth-Token": authToken, "Content-Type": "application/json" },
     body: JSON.stringify({
@@ -581,6 +594,7 @@ async function triggerVobizOutboundCall(orgId, phoneNumber, { questions, from, l
     // failed to place. Stringify explicitly so the real detail survives.
     const rawErr = data.error || data.message || `Vobiz API error (Status: ${response.status})`;
     const errText = typeof rawErr === "string" ? rawErr : JSON.stringify(rawErr);
+    if (billingReservation) await rechargeBilling.releaseReservation(billingReservation.id).catch(() => {});
     log.error(`❌ Vobiz outbound call API rejected it — status ${response.status}, body:`, JSON.stringify(data));
     throw new Error(errText);
   }
@@ -590,13 +604,16 @@ async function triggerVobizOutboundCall(orgId, phoneNumber, { questions, from, l
   // (CallUUID / callId) over request_uuid, and remember every alias so a
   // later webhook using a different field still finds org + retryContext.
   const responseCallIds = collectVobizCallIds(data);
+  if (billingReservation) {
+    await rechargeBilling.attachProviderCall(billingReservation.id, responseCallIds[0] || null);
+  }
   const callSids = rememberOutboundCall(
     responseCallIds.length ? responseCallIds : [`vobiz_outbound_${Date.now()}`],
     {
       orgId,
       direction: "outbound",
       attemptNumber,
-      retryContext: { questions, from, language, assignedContact, taskId, leadId, provider: "vobiz" },
+      retryContext: { questions, from, language, assignedContact, taskId, leadId, provider: "vobiz", billingReservationId: billingReservation?.id || null },
       fromNumber: sanitizedFrom,
       toNumber: sanitizedTo,
     }
@@ -1233,6 +1250,7 @@ If the tool result has 'deferred: true', tell the caller their personalized quot
     vobizCallAttemptNumber.delete(callId);
     const retryContext = vobizCallRetryContext.get(callId) || null;
     vobizCallRetryContext.delete(callId);
+    const billingReservationId = retryContext?.billingReservationId || null;
     const direction = vobizCallDirection.get(callId) || "unknown";
     vobizCallDirection.delete(callId);
     vobizCallFinalizers.unregister(callId);
@@ -1291,6 +1309,7 @@ If the tool result has 'deferred: true', tell the caller their personalized quot
 
     postCallQueue.enqueue("finalizeCall:vobiz", {
       callId: generatedCallId, callerNumber, recordingUrl, durationSeconds: duration,
+      billingReservationId,
       transcriptLines, activeConfig, liveInputTokens, liveOutputTokens,
       totalInboundAudioBytes, totalOutboundAudioBytes, orgId, direction,
       isMachineDetected, attemptNumber, retryContext, sanitizedCallee: sanitizedCalleeForFinalize,
@@ -2194,7 +2213,7 @@ async function processPostCallData({
   liveInputTokens, liveOutputTokens, totalInboundAudioBytes, totalOutboundAudioBytes,
   orgId = null, direction = "unknown", isMachineDetected = false, attemptNumber = 1,
   retryContext = null, sanitizedCallee = null, providerCallSid = null,
-  workflowQuestions = null,
+  workflowQuestions = null, billingReservationId = null,
 }) {
   callerNumber = normalizePhone(callerNumber);
 
@@ -2276,6 +2295,20 @@ async function processPostCallData({
   // anywhere in the app itself. Everything from contact matching through
   // the call_logs write and broadcast is shared across every provider —
   // see callFinalizer.js.
+  if (billingReservationId) {
+    try {
+      const aiSummary = await db.getAiUsageSummary(orgId, {}).catch(() => null);
+      const aiCostInr = aiSummary?.platformTotalCostInr ?? null;
+      await rechargeBilling.settleReservation({
+        reservationId: billingReservationId,
+        durationSeconds,
+        aiCostInr,
+      });
+    } catch (err) {
+      log.error(`❌ Failed to settle recharge reservation ${billingReservationId}:`, err.message);
+    }
+  }
+
   await callFinalizer.finalizeCallRecord({
     provider: "vobiz",
     orgId,

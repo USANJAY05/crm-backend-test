@@ -94,8 +94,26 @@ const TABLES = {
     columns: {
       id: "text", name: "text", workspace_name: "text", industry: "text",
       subscription_plan: "text", ai_minutes_used: "real", ai_minutes_limit: "int",
-      phone_charges: "real", billing_period_end: "text", settings: "json",
+      phone_charges: "real", billing_period_end: "text", billing_method: "text", charge_scope: "text",
+      recharge_balance_inr: "real", recharge_reserved_inr: "real", settings: "json",
       feature_flags: "array", status: "text", created_at: "text"
+    }
+  },
+  recharge_billing_reservations: {
+    pk: "id",
+    columns: {
+      id: "text", org_id: "text", provider: "text", estimated_amount_inr: "real",
+      actual_amount_inr: "real", duration_seconds: "real", status: "text",
+      provider_call_sid: "text", created_at: "text", updated_at: "text",
+      released_at: "text", finalized_at: "text"
+    }
+  },
+  recharge_billing_transactions: {
+    pk: "id",
+    columns: {
+      id: "text", org_id: "text", type: "text", amount_inr: "real",
+      balance_before_inr: "real", balance_after_inr: "real", metadata: "json",
+      created_at: "text"
     }
   },
   org_members: {
@@ -547,6 +565,8 @@ const VARCHAR_COLUMNS = new Map([
   ["current_lead_id", "VARCHAR(191)"],
   ["current_provider_call_sid", "VARCHAR(255)"],
   ["provider_call_sid", "VARCHAR(255)"],
+  ["billing_method", "VARCHAR(32)"],
+  ["charge_scope", "VARCHAR(64)"],
   // Indexed columns: MySQL cannot put a BLOB/TEXT column in a key without a
   // prefix length, so every column referenced by a CREATE INDEX below must
   // resolve to a bounded type instead of the LONGTEXT default.

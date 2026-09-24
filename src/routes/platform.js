@@ -211,7 +211,8 @@ router.post("/organizations", async (req, res) => {
   try {
     const {
       name, workspaceName, industry, subscriptionPlan, adminEmail, adminName, featureFlags,
-      gcpProjectMode = "existing", gcpProject, callProvider
+      gcpProjectMode = "existing", gcpProject, callProvider,
+      billingMethod = "pay_as_you_go", chargeScope = "ai_only", initialRechargeAmountInr = 0
     } = req.body || {};
     if (!name || !workspaceName) return res.status(400).json({ error: "name and workspaceName are required" });
 
@@ -277,6 +278,13 @@ router.post("/organizations", async (req, res) => {
     }
 
     const orgFeatureFlags = Array.isArray(featureFlags) ? featureFlags : [];
+    if (!["pay_as_you_go", "recharge_based"].includes(billingMethod)) {
+      return res.status(400).json({ error: "Invalid billing method." });
+    }
+    if (!["ai_only", "ai_and_call_provider"].includes(chargeScope)) {
+      return res.status(400).json({ error: "Invalid billing charge scope." });
+    }
+    const initialRecharge = Math.max(0, Number(initialRechargeAmountInr) || 0);
     const { org, cloudProject, memberId } = await db.createOrganizationSetup({
       name, workspaceName, industry, subscriptionPlan,
       featureFlags: orgFeatureFlags,
@@ -288,6 +296,9 @@ router.post("/organizations", async (req, res) => {
         credentialsEncrypted: validatedGcp.credentialsEncrypted,
       },
       callProvider: { provider, authId, authToken, phoneNumber },
+      billingMethod,
+      chargeScope,
+      initialRechargeAmountInr: initialRecharge,
     });
 
     let tempPassword = null;
@@ -329,7 +340,8 @@ router.post("/organizations", async (req, res) => {
     await auditLog.record(null, { userId: req.userId, userEmail: req.userEmail },
       "create_organization", "organization", org.id, {
         name, workspaceName, adminEmail, gcpProjectMode: "existing", gcpProjectId: validatedGcp.project.projectId,
-        callProvider: provider, callProviderPhoneNumber: phoneNumber
+        callProvider: provider, callProviderPhoneNumber: phoneNumber,
+        billingMethod, chargeScope, initialRechargeAmountInr: initialRecharge
       });
 
     res.status(201).json({
@@ -351,6 +363,47 @@ router.post("/organizations", async (req, res) => {
     }
     handleError(err, res);
   }
+});
+
+// PATCH /api/platform/organizations/:id/billing
+// Change the organization's billing mode/scope without touching call credentials.
+router.patch("/organizations/:id/billing", async (req, res) => {
+  try {
+    const org = await db.getOrg(req.params.id);
+    if (!org) return res.status(404).json({ error: "Organization not found" });
+    const billingMethod = req.body?.billingMethod;
+    const chargeScope = req.body?.chargeScope;
+    if (billingMethod !== undefined && !["pay_as_you_go", "recharge_based"].includes(billingMethod)) {
+      return res.status(400).json({ error: "Invalid billing method." });
+    }
+    if (chargeScope !== undefined && !["ai_only", "ai_and_call_provider"].includes(chargeScope)) {
+      return res.status(400).json({ error: "Invalid charge scope." });
+    }
+    const updated = await db.updateOrg(org.id, {
+      ...(billingMethod !== undefined ? { billingMethod } : {}),
+      ...(chargeScope !== undefined ? { chargeScope } : {}),
+    });
+    await auditLog.record(null, { userId: req.userId, userEmail: req.userEmail }, "platform.org.billing.update", "organization", org.id, {
+      billingMethod: updated.billingMethod, chargeScope: updated.chargeScope,
+    });
+    res.json(updated);
+  } catch (err) { handleError(err, res); }
+});
+
+// POST /api/platform/organizations/:id/recharge
+router.post("/organizations/:id/recharge", async (req, res) => {
+  try {
+    const org = await db.getOrg(req.params.id);
+    if (!org) return res.status(404).json({ error: "Organization not found" });
+    const rechargeBilling = require("../crm/rechargeBilling");
+    const result = await rechargeBilling.rechargeOrganization(req.params.id, req.body?.amount, {
+      userId: req.userId, userEmail: req.userEmail
+    });
+    await auditLog.record(null, { userId: req.userId, userEmail: req.userEmail }, "platform.org.recharge", "organization", req.params.id, {
+      amountInr: Number(req.body?.amount) || 0, balanceInr: result.balanceInr
+    });
+    res.json(await rechargeBilling.getBillingState(req.params.id));
+  } catch (err) { handleError(err, res); }
 });
 
 // GET /api/platform/organizations/:id/gcp-project
