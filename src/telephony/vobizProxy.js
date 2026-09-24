@@ -585,8 +585,15 @@ async function triggerVobizOutboundCall(orgId, phoneNumber, { questions, from, l
       machine_detection: "false"
     })
   });
+  } catch (err) {
+    if (billingReservation) {
+      await rechargeBilling.releaseReservation(billingReservation.id).catch(() => {});
+    }
+    log.error("❌ Vobiz outbound call request failed:", err.message);
+    throw err;
+  }
 
-  const data = await response.json();
+  data = await response.json();
   if (!response.ok) {
     // data.error/data.message can be a nested object on some Vobiz error
     // responses, not a plain string — new Error(obj) silently stringifies
