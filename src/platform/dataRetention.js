@@ -308,21 +308,16 @@ async function exportOrgBackup(orgId, orgName, backupConfig) {
     };
     await writeJsonFile(path.join(root, "manifest.json"), manifest);
 
-    const { data: tables, error: tableError } = await db.supabase.from("information_schema.tables")
-      .select("table_name").eq("table_schema", process.env.MYSQL_DATABASE || "crm");
-    if (tableError) throw tableError;
+    const [tableResult] = await db.pool.query(
+      "SELECT DISTINCT TABLE_NAME AS table_name FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND COLUMN_NAME = 'org_id'"
+    );
 
     const exportedTables = [];
-    for (const row of tables || []) {
-      const table = row.table_name;
+    for (const row of tableResult || []) {
+      const table = String(row.table_name || "");
       if (!/^[a-zA-Z0-9_]+$/.test(table)) continue;
       try {
-        const { data: columns } = await db.supabase.from("information_schema.columns")
-          .select("column_name").eq("table_schema", process.env.MYSQL_DATABASE || "crm").eq("table_name", table);
-        const columnNames = (columns || []).map(c => c.column_name);
-        if (!columnNames.includes("org_id")) continue;
-        const { data: rows, error } = await db.supabase.from(table).select("*").eq("org_id", orgId);
-        if (error) continue;
+        const [rows] = await db.pool.query(`SELECT * FROM \`${table}\` WHERE org_id = ?`, [orgId]);
         await writeJsonFile(path.join(dataDir, `${table}.json`), rows || []);
         exportedTables.push({ table, rows: rows?.length || 0 });
       } catch (err) {
@@ -348,6 +343,7 @@ async function exportOrgBackup(orgId, orgName, backupConfig) {
         recordingManifest.push({ callId: row.id, error: err.message });
       }
     }
+    await writeJsonFile(path.join(root, "table-manifest.json"), exportedTables);
     await writeJsonFile(path.join(root, "recording-manifest.json"), recordingManifest);
     await writeJsonFile(path.join(root, "retention-policy.json"), await getOrgPolicy(orgId));
 
