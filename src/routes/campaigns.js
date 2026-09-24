@@ -116,8 +116,28 @@ router.get("/dialer-tasks", requireAuth, async (req, res) => {
 });
 
 router.post("/dialer-tasks/sync", requireAuth, async (req, res) => {
-  try { res.json(await db.replaceAll("dialertasks", req.orgId, req.body)); }
-  catch (err) { res.status(500).json({ error: safeErrorMessage(err) }); }
+  try {
+    // The browser periodically syncs its local task list, but server-side
+    // auto-dial runtime state is authoritative. Never let a stale React/
+    // localStorage snapshot turn auto-dial back on after the user pressed Stop.
+    const incoming = Array.isArray(req.body) ? req.body : [];
+    const existing = await db.list("dialertasks", req.orgId);
+    const byId = new Map(existing.map((task) => [task.id, task]));
+    const runtimeFields = [
+      "autoDialEnabled", "autoDialStatus", "autoDialStartedAt", "nextDialAt",
+      "currentLeadId", "currentProviderCallSid", "currentProvider", "currentCallStartedAt",
+    ];
+    const merged = incoming.map((task) => {
+      const current = byId.get(task.id);
+      if (!current) return task;
+      const copy = { ...task };
+      for (const field of runtimeFields) {
+        if (Object.prototype.hasOwnProperty.call(current, field)) copy[field] = current[field];
+      }
+      return copy;
+    });
+    res.json(await db.replaceAll("dialertasks", req.orgId, merged));
+  } catch (err) { res.status(500).json({ error: safeErrorMessage(err) }); }
 });
 
 // Per-task update — added alongside /sync so a single field (e.g. the
