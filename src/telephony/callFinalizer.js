@@ -565,15 +565,19 @@ async function finalizeCallRecord({
         });
         const taskFinished = !remainingPending && !waitingForCallbacks;
 
+        // A completed call must always stop Auto Dial. Auto Dial is
+        // explicitly user-controlled; finishing one call must not silently
+        // schedule the next lead. Scheduled callbacks remain owned by the
+        // callback/retry engine and do not require autoDialEnabled.
         await db.patch("dialertasks", orgId, retryContext.taskId, {
           callResults,
           currentLeadId: null,
           currentProviderCallSid: null,
           currentProvider: null,
           currentCallStartedAt: null,
-          autoDialEnabled: taskFinished ? false : task.autoDialEnabled,
-          autoDialStatus: taskFinished ? "completed" : (waitingForCallbacks ? "waiting_for_callbacks" : (task.autoDialEnabled ? "waiting" : "paused")),
-          nextDialAt: taskFinished ? null : new Date(Date.now() + 3000).toISOString(),
+          autoDialEnabled: false,
+          autoDialStatus: taskFinished ? "completed" : (waitingForCallbacks ? "waiting_for_callbacks" : "paused"),
+          nextDialAt: null,
         });
 
         if (taskFinished && global.broadcastLog) {
