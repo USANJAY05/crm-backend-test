@@ -41,6 +41,21 @@ function getPublicBaseUrl() {
 }
 
 async function processDueRetries() {
+  try {
+    const recovered = await db.recoverStaleRetryClaims();
+    if (recovered) {
+      log.warn(`♻️ [dialerRetryEngine] Recovered ${recovered} stale retry claim(s) after scheduler restart.`);
+    }
+  } catch (err) {
+    log.error("❌ [dialerRetryEngine] Failed to recover stale retry claims:", err.message);
+  }
+
+  const queue = getRedialQueue();
+  if (typeof queue.isReady === "function" && !queue.isReady()) {
+    log.warn("⏸️ [dialerRetryEngine] Durable queue is not ready; leaving callbacks pending for the next scheduler tick.");
+    return;
+  }
+
   let due = [];
   try {
     due = await db.getCallsDueForRetry();
@@ -142,7 +157,7 @@ async function handlePlaceRedialJob(data) {
     await telephony.triggerOutboundCall(provider, orgId, dialTarget, {
       baseUrl, attemptNumber, questions, from, language, assignedContact, taskId, leadId,
     });
-    await db.patch("calllogs", orgId, rowId, { retryStatus: "retried" });
+    await db.patch("calllogs", orgId, rowId, { retryStatus: "retried", retryClaimedAt: null });
   } catch (err) {
     log.error(`❌ [dialerRetryEngine] Redial placement failed for ${leadName} (org ${orgId}):`, err.message);
     const retryFields = db.computeRetryFields(attemptNumber);
