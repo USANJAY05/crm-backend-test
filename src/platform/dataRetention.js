@@ -31,7 +31,7 @@ const DATA_TYPES = {
   campaign_history: { label: "Campaign history", defaultDays: 365 },
   audit_logs: { label: "Audit logs", defaultDays: 730 },
   documents: { label: "Uploaded documents", defaultDays: 365 },
-  contacts: { label: "Contacts", defaultDays: null },
+  contacts: { label: "Contacts", defaultDays: 365 },
 };
 
 const DEFAULT_POLICY = Object.fromEntries(
@@ -66,7 +66,16 @@ function normalizePolicy(input, base = DEFAULT_POLICY) {
 }
 
 async function getPlatformDefaults() {
-  const stored = await platformSettings.getSetting(PLATFORM_KEY, DEFAULT_POLICY);
+  const stored = await platformSettings.getSetting(PLATFORM_KEY, null);
+
+  // Migrate the original "all Never" platform policy to the defined defaults.
+  // Once an admin changes a value (including intentionally choosing Never),
+  // that stored policy is respected normally.
+  if (!stored || (typeof stored === "object" && Object.keys(DATA_TYPES).every((key) => stored[key] == null))) {
+    await platformSettings.setSetting(PLATFORM_KEY, DEFAULT_POLICY);
+    return { ...DEFAULT_POLICY };
+  }
+
   return normalizePolicy(stored, DEFAULT_POLICY);
 }
 
