@@ -177,13 +177,30 @@ async function processTask(task) {
           callbackTime: finishedLog.callbackTime || undefined,
         };
       }
+      // Auto-dial is a single-call execution mode: once the current
+      // call finishes, stop dialing automatically. The user must explicitly
+      // start Auto Dial again to place another call. Previously this branch
+      // changed the task back to "waiting" while leaving autoDialEnabled=true,
+      // which caused the next scheduler tick to dial another lead and made
+      // users manually stop the campaign.
+      const remainingPending = (task.leadIds || []).some((id) => {
+        const result = callResults[id];
+        return !result || result.status === "Pending";
+      });
+      const waitingForCallbacks = !remainingPending && (task.leadIds || []).some((id) => {
+        const result = callResults[id];
+        return result && result.status === "Callback Scheduled";
+      });
+      const taskFinished = !remainingPending && !waitingForCallbacks;
+
       await db.patch("dialertasks", orgId, taskId, {
         callResults,
         currentLeadId: null,
         currentProviderCallSid: null,
         currentCallStartedAt: null,
-        autoDialStatus: task.autoDialEnabled ? "waiting" : "paused",
-        nextDialAt: new Date(Date.now() + INTER_CALL_DELAY_MS).toISOString(),
+        autoDialEnabled: false,
+        autoDialStatus: taskFinished ? "completed" : (waitingForCallbacks ? "waiting_for_callbacks" : "paused"),
+        nextDialAt: null,
       });
       if (global.broadcastLog) {
         global.broadcastLog(`🤖 Auto-dial: finished call to lead ${leadId || "(unknown)"} for task "${task.name}" — ${finishedLog.status}`, {
@@ -363,6 +380,18 @@ async function handlePlaceDialJob(data) {
     const result = await telephony.triggerOutboundCall(provider, orgId, leadPhone, {
       baseUrl, questions, language, from, agentId, starhealthEnabled, taskId, leadId,
     });
+
+    // The provider can answer/hang up very quickly. The finalizer may have
+    // already completed this lead while triggerOutboundCall was returning.
+    // Re-read the task before publishing the provider SID so a completed
+    // final call cannot resurrect the task's in-flight lease and cause the
+    // auto-dial loop to continue after the campaign is actually finished.
+    const tasksAfterDial = await db.list("dialertasks", orgId);
+    const taskAfterDial = tasksAfterDial.find((t) => t.id === taskId);
+    if (!taskAfterDial || !taskAfterDial.autoDialEnabled || taskAfterDial.currentLeadId !== leadId) {
+      log.info(`🤖 [autoDialEngine] Call for lead ${leadId} completed/stopped before placement state could be committed; not resurrecting task ${taskId}.`);
+      return;
+    }
 
     await db.patch("dialertasks", orgId, taskId, { currentProviderCallSid: result.callSid, currentProvider: provider });
     if (global.broadcastLog) {

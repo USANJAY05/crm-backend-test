@@ -547,18 +547,47 @@ async function finalizeCallRecord({
         // only via the auto-dial poller. The poller discovers completion by
         // looking up call_logs, so waiting for another poll creates a race
         // where the UI/task can remain in "dialing" even though this call is
-        // already finalized. Clearing the provider SID also makes this
+        // already finalized. Clearing the provider SID also makes it
         // idempotent: a later scheduler tick cannot treat the same call as
         // still active and re-process it.
+        //
+        // Important: if this was the final lead, finish the auto-dial task
+        // here instead of waiting for a later poll. This also closes the
+        // race with handlePlaceDialJob(), which can return from the provider
+        // call after the finalizer has already cleared the in-flight lease.
+        const remainingPending = (task.leadIds || []).some((leadId) => {
+          const result = callResults[leadId];
+          return !result || result.status === "Pending";
+        });
+        const waitingForCallbacks = !remainingPending && (task.leadIds || []).some((leadId) => {
+          const result = callResults[leadId];
+          return result && result.status === "Callback Scheduled";
+        });
+        const taskFinished = !remainingPending && !waitingForCallbacks;
+
+        // A completed call must always stop Auto Dial. Auto Dial is
+        // explicitly user-controlled; finishing one call must not silently
+        // schedule the next lead. Scheduled callbacks remain owned by the
+        // callback/retry engine and do not require autoDialEnabled.
         await db.patch("dialertasks", orgId, retryContext.taskId, {
           callResults,
           currentLeadId: null,
           currentProviderCallSid: null,
           currentProvider: null,
           currentCallStartedAt: null,
-          autoDialStatus: task.autoDialEnabled ? "waiting" : "paused",
-          nextDialAt: new Date(Date.now() + 3000).toISOString(),
+          autoDialEnabled: false,
+          autoDialStatus: taskFinished ? "completed" : (waitingForCallbacks ? "waiting_for_callbacks" : "paused"),
+          nextDialAt: null,
         });
+
+        if (taskFinished && global.broadcastLog) {
+          global.broadcastLog(`🤖 Auto-dial task "${task.name}" completed — every lead has been dialed.`, {
+            type: "auto_dial_progress",
+            orgId,
+            taskId: retryContext.taskId,
+            status: "task_completed",
+          });
+        }
       }
     } catch (err) {
       log.error(`❌ [${provider}] Failed to update task ${retryContext.taskId} callResults for lead ${retryContext.leadId}:`, err.message);
