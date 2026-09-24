@@ -378,6 +378,9 @@ router.post("/organizations", async (req, res) => {
       billingMethod,
       chargeScope,
       initialRechargeAmountInr: initialRecharge,
+      dataRetentionMode,
+      dataRetentionOverrides,
+      backup,
     });
 
     let tempPassword = null;
