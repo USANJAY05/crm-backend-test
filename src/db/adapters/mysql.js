@@ -99,6 +99,23 @@ const TABLES = {
       feature_flags: "array", status: "text", created_at: "text"
     }
   },
+  recharge_billing_reservations: {
+    pk: "id",
+    columns: {
+      id: "text", org_id: "text", provider: "text", estimated_amount_inr: "real",
+      actual_amount_inr: "real", duration_seconds: "real", status: "text",
+      provider_call_sid: "text", created_at: "text", updated_at: "text",
+      released_at: "text", finalized_at: "text"
+    }
+  },
+  recharge_billing_transactions: {
+    pk: "id",
+    columns: {
+      id: "text", org_id: "text", type: "text", amount_inr: "real",
+      balance_before_inr: "real", balance_after_inr: "real", metadata: "json",
+      created_at: "text"
+    }
+  },
   org_members: {
     pk: "id",
     // Email is globally unique because one auth identity maps to one customer org.
