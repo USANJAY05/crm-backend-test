@@ -364,4 +364,5 @@ module.exports = {
   listOrganizations, listUsers, listAuditLog, getStats, getTimeSeries, getOrganizationDetail,
   getPricing, updatePricing, getFeatureFlags, updateFeatureFlag, deleteOrganization,
   listCostProviders, upsertCostProvider, listCostArchive,
+  getFeatureGroups, saveFeatureGroup, deleteFeatureGroup, sanitizeFeatureKeys,
 };
