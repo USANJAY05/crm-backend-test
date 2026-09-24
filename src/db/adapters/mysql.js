@@ -94,7 +94,8 @@ const TABLES = {
     columns: {
       id: "text", name: "text", workspace_name: "text", industry: "text",
       subscription_plan: "text", ai_minutes_used: "real", ai_minutes_limit: "int",
-      phone_charges: "real", billing_period_end: "text", settings: "json",
+      phone_charges: "real", billing_period_end: "text", billing_method: "text", charge_scope: "text",
+      recharge_balance_inr: "real", recharge_reserved_inr: "real", settings: "json",
       feature_flags: "array", status: "text", created_at: "text"
     }
   },
@@ -547,6 +548,8 @@ const VARCHAR_COLUMNS = new Map([
   ["current_lead_id", "VARCHAR(191)"],
   ["current_provider_call_sid", "VARCHAR(255)"],
   ["provider_call_sid", "VARCHAR(255)"],
+  ["billing_method", "VARCHAR(32)"],
+  ["charge_scope", "VARCHAR(64)"],
   // Indexed columns: MySQL cannot put a BLOB/TEXT column in a key without a
   // prefix length, so every column referenced by a CREATE INDEX below must
   // resolve to a bounded type instead of the LONGTEXT default.
