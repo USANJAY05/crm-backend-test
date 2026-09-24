@@ -36,39 +36,7 @@ services:
     ports:
       - "3000:3000"
     depends_on:
-      # Dedicated durable callback scheduler. It owns ONLY callback/retry
-  # timing; the API container can crash or be redeployed without losing the
-  # callback schedule. Due callbacks are persisted in MySQL and dispatched
-  # through the durable RabbitMQ queue to the API worker.
-  #
-  # Future AWS migration: replace this container with EventBridge Scheduler
-  # targeting the same provider-agnostic callback schedule/dispatch contract.
-  callback-scheduler:
-    build: .
-    restart: unless-stopped
-    command: ["node", "callback-scheduler.js"]
-    env_file:
-      - path: .env
-        required: true
-    environment:
-      NODE_ENV: ${NODE_ENV:-production}
-      SCHEDULER_PROVIDER: ${SCHEDULER_PROVIDER:-local}
-      CALLBACK_SCHEDULER_SCHEDULE: ${CALLBACK_SCHEDULER_SCHEDULE:-* * * * *}
-      QUEUE_PROVIDER: ${QUEUE_PROVIDER:-rabbitmq}
-      RABBITMQ_URL: ${RABBITMQ_URL:-amqp://${RABBITMQ_USER}:${RABBITMQ_PASSWORD}@rabbitmq:5672}
-      MYSQL_HOST: mysql
-      MYSQL_PORT: 3306
-      REDIS_HOST: redis
-      REDIS_PORT: 6379
-      REDIS_URL: redis://redis:6379
-    depends_on:
       mysql:
-        condition: service_healthy
-      rabbitmq:
-        condition: service_healthy
-    networks: [internal]
-
-  mysql:
         condition: service_healthy
       redis:
         condition: service_healthy
@@ -98,6 +66,38 @@ services:
       mysql:
         condition: service_healthy
       redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    networks: [internal]
+
+  # Dedicated durable callback scheduler. It owns ONLY callback/retry
+  # timing; the API container can crash or be redeployed without losing the
+  # callback schedule. Due callbacks are persisted in MySQL and dispatched
+  # through the durable RabbitMQ queue to the API worker.
+  #
+  # Future AWS migration: replace this container with EventBridge Scheduler
+  # targeting the same provider-agnostic callback schedule/dispatch contract.
+  callback-scheduler:
+    build: .
+    restart: unless-stopped
+    command: ["node", "callback-scheduler.js"]
+    env_file:
+      - path: .env
+        required: true
+    environment:
+      NODE_ENV: ${NODE_ENV:-production}
+      SCHEDULER_PROVIDER: ${SCHEDULER_PROVIDER:-local}
+      CALLBACK_SCHEDULER_SCHEDULE: ${CALLBACK_SCHEDULER_SCHEDULE:-* * * * *}
+      QUEUE_PROVIDER: ${QUEUE_PROVIDER:-rabbitmq}
+      RABBITMQ_URL: ${RABBITMQ_URL:-amqp://${RABBITMQ_USER}:${RABBITMQ_PASSWORD}@rabbitmq:5672}
+      MYSQL_HOST: mysql
+      MYSQL_PORT: 3306
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_URL: redis://redis:6379
+    depends_on:
+      mysql:
         condition: service_healthy
       rabbitmq:
         condition: service_healthy
