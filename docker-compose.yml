@@ -79,7 +79,9 @@ services:
   # Future AWS migration: replace this container with EventBridge Scheduler
   # targeting the same provider-agnostic callback schedule/dispatch contract.
   callback-scheduler:
-    build: .
+    build:
+      context: .
+      dockerfile: callback-scheduler.Dockerfile
     restart: unless-stopped
     command: ["node", "callback-scheduler.js"]
     env_file:
@@ -87,8 +89,10 @@ services:
         required: true
     environment:
       NODE_ENV: ${NODE_ENV:-production}
-      SCHEDULER_PROVIDER: ${SCHEDULER_PROVIDER:-local}
-      CALLBACK_SCHEDULER_SCHEDULE: ${CALLBACK_SCHEDULER_SCHEDULE:-* * * * *}
+      SCHEDULER_PROVIDER: ${SCHEDULER_PROVIDER:-bullmq}
+      CALLBACK_SCHEDULER_RECONCILE_MS: ${CALLBACK_SCHEDULER_RECONCILE_MS:-60000}
+      CALLBACK_SCHEDULER_QUEUE: ${CALLBACK_SCHEDULER_QUEUE:-crm-callback-scheduler}
+      CALLBACK_SCHEDULER_CONCURRENCY: ${CALLBACK_SCHEDULER_CONCURRENCY:-1}
       QUEUE_PROVIDER: ${QUEUE_PROVIDER:-rabbitmq}
       RABBITMQ_URL: ${RABBITMQ_URL:-amqp://${RABBITMQ_USER}:${RABBITMQ_PASSWORD}@rabbitmq:5672}
       MYSQL_HOST: mysql
@@ -128,7 +132,7 @@ services:
   redis:
     image: redis:7-alpine
     restart: unless-stopped
-    command: ["redis-server", "--appendonly", "yes"]
+    command: ["redis-server", "--appendonly", "yes", "--maxmemory-policy", "noeviction"]
     volumes:
       - redis_data:/data
     healthcheck:
