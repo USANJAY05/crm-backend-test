@@ -2213,7 +2213,7 @@ async function processPostCallData({
   liveInputTokens, liveOutputTokens, totalInboundAudioBytes, totalOutboundAudioBytes,
   orgId = null, direction = "unknown", isMachineDetected = false, attemptNumber = 1,
   retryContext = null, sanitizedCallee = null, providerCallSid = null,
-  workflowQuestions = null,
+  workflowQuestions = null, billingReservationId = null,
 }) {
   callerNumber = normalizePhone(callerNumber);
 
@@ -2295,6 +2295,20 @@ async function processPostCallData({
   // anywhere in the app itself. Everything from contact matching through
   // the call_logs write and broadcast is shared across every provider —
   // see callFinalizer.js.
+  if (billingReservationId) {
+    try {
+      const aiSummary = await db.getAiUsageSummary(orgId, {}).catch(() => null);
+      const aiCostInr = aiSummary?.platformTotalCostInr ?? null;
+      await rechargeBilling.settleReservation({
+        reservationId: billingReservationId,
+        durationSeconds,
+        aiCostInr,
+      });
+    } catch (err) {
+      log.error(`❌ Failed to settle recharge reservation ${billingReservationId}:`, err.message);
+    }
+  }
+
   await callFinalizer.finalizeCallRecord({
     provider: "vobiz",
     orgId,
