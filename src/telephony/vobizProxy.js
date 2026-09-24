@@ -477,6 +477,7 @@ async function resolveVobizCallSetup(resolvedOrgId, calleeNumber, resolvedPhone,
 async function triggerVobizOutboundCall(orgId, phoneNumber, { questions, from, language, assignedContact, baseUrl, attemptNumber = 1, starhealthEnabled = false, agentId, taskId = null, leadId = null } = {}) {
   const channelsEngine = require("../channels/engine");
   const billingEngine = require("../crm/billingEngine");
+  const rechargeBilling = require("../crm/rechargeBilling");
   const complianceEngine = require("../crm/complianceEngine");
 
   let fromNumber = null;
@@ -516,6 +517,14 @@ async function triggerVobizOutboundCall(orgId, phoneNumber, { questions, from, l
   if (agentId) {
     const sanitizedNumber = phoneNumber.replace(/[\s\-\(\)\+]+/g, "");
     vobizCallAgentId.set(sanitizedNumber, agentId);
+  }
+
+  let billingReservation = null;
+  try {
+    billingReservation = await rechargeBilling.authorizeOutboundCall(orgId, { providerKey: "vobiz" });
+  } catch (err) {
+    log.warn(`⚠️ Recharge billing blocked Vobiz call for org ${orgId}: ${err.message}`);
+    throw err;
   }
 
   const ownChannel = await channelsEngine.getChannel(orgId, "vobiz").catch(() => null);
@@ -581,6 +590,7 @@ async function triggerVobizOutboundCall(orgId, phoneNumber, { questions, from, l
     // failed to place. Stringify explicitly so the real detail survives.
     const rawErr = data.error || data.message || `Vobiz API error (Status: ${response.status})`;
     const errText = typeof rawErr === "string" ? rawErr : JSON.stringify(rawErr);
+    if (billingReservation) await rechargeBilling.releaseReservation(billingReservation.id).catch(() => {});
     log.error(`❌ Vobiz outbound call API rejected it — status ${response.status}, body:`, JSON.stringify(data));
     throw new Error(errText);
   }
@@ -590,13 +600,16 @@ async function triggerVobizOutboundCall(orgId, phoneNumber, { questions, from, l
   // (CallUUID / callId) over request_uuid, and remember every alias so a
   // later webhook using a different field still finds org + retryContext.
   const responseCallIds = collectVobizCallIds(data);
+  if (billingReservation) {
+    await rechargeBilling.attachProviderCall(billingReservation.id, responseCallIds[0] || null);
+  }
   const callSids = rememberOutboundCall(
     responseCallIds.length ? responseCallIds : [`vobiz_outbound_${Date.now()}`],
     {
       orgId,
       direction: "outbound",
       attemptNumber,
-      retryContext: { questions, from, language, assignedContact, taskId, leadId, provider: "vobiz" },
+      retryContext: { questions, from, language, assignedContact, taskId, leadId, provider: "vobiz", billingReservationId: billingReservation?.id || null },
       fromNumber: sanitizedFrom,
       toNumber: sanitizedTo,
     }
