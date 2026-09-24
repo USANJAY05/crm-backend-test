@@ -13,6 +13,7 @@ const { costForMinutes, getCostPerMinuteInr, getPhoneCostPerMinute, setPhoneCost
 const costProviders = require("./costProviders");
 const auditLog = require("./auditLog");
 const featureFlags = require("./featureFlags");
+const dataRetention = require("./dataRetention");
 const storage = require("../storage");
 const { getLogger } = require("../observability/logger");
 const log = getLogger("platform.admin");
@@ -325,6 +326,46 @@ async function sanitizeFeatureKeys(keys) {
   return featureFlags.sanitizeFeatureKeys(keys);
 }
 
+async function getDataRetentionDefaults() {
+  return dataRetention.getPlatformDefaults();
+}
+
+async function setDataRetentionDefaults(actor, policy) {
+  const result = await dataRetention.setPlatformDefaults(policy);
+  await auditLog.record(null, actor, "platform.retention.defaults.update", "data_retention", "defaults", { policy: result });
+  return result;
+}
+
+async function getOrganizationDataRetention(orgId) {
+  return dataRetention.getOrgPolicy(orgId);
+}
+
+async function setOrganizationDataRetention(actor, orgId, input) {
+  const result = await dataRetention.setOrgPolicy(orgId, input);
+  await auditLog.record(null, actor, "platform.org.retention.update", "data_retention", orgId, { mode: result.mode, policy: result.policy });
+  return result;
+}
+
+async function setOrganizationBackup(actor, orgId, input) {
+  const result = await dataRetention.setOrgBackup(orgId, input);
+  await auditLog.record(null, actor, "platform.org.backup.update", "data_backup", orgId, { backup: result });
+  return result;
+}
+
+async function previewOrganizationRetention(orgId) {
+  return dataRetention.previewOrg(orgId);
+}
+
+async function requestOrganizationBackup(actor, orgId) {
+  const result = await dataRetention.requestBackup(orgId);
+  await auditLog.record(null, actor, "platform.org.backup.request", "data_backup", orgId, result);
+  return result;
+}
+
+async function getOrganizationBackupStatus(orgId) {
+  return dataRetention.getBackupStatus(orgId);
+}
+
 // Hard-deletes an organization and all of its data across every table.
 // Called only by platform admins after a name-confirmation step.
 //
@@ -365,4 +406,7 @@ module.exports = {
   getPricing, updatePricing, getFeatureFlags, updateFeatureFlag, deleteOrganization,
   listCostProviders, upsertCostProvider, listCostArchive,
   getFeatureGroups, saveFeatureGroup, deleteFeatureGroup, sanitizeFeatureKeys,
+  getDataRetentionDefaults, setDataRetentionDefaults, getOrganizationDataRetention,
+  setOrganizationDataRetention, setOrganizationBackup, previewOrganizationRetention,
+  requestOrganizationBackup, getOrganizationBackupStatus,
 };

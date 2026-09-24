@@ -196,6 +196,55 @@ router.get("/features", async (req, res) => {
   }
 });
 
+// ── Data retention defaults and organization policies ─────────────────────
+router.get("/data-retention/defaults", async (req, res) => {
+  try { res.json(await platformAdmin.getDataRetentionDefaults()); }
+  catch (err) { handleError(err, res); }
+});
+
+router.put("/data-retention/defaults", async (req, res) => {
+  try {
+    const actor = { userId: req.userId, userEmail: req.userEmail };
+    res.json(await platformAdmin.setDataRetentionDefaults(actor, req.body?.policy || req.body || {}));
+  } catch (err) { handleError(err, res); }
+});
+
+router.get("/organizations/:id/data-retention", async (req, res) => {
+  try { res.json(await platformAdmin.getOrganizationDataRetention(req.params.id)); }
+  catch (err) { handleError(err, res); }
+});
+
+router.put("/organizations/:id/data-retention", async (req, res) => {
+  try {
+    const actor = { userId: req.userId, userEmail: req.userEmail };
+    res.json(await platformAdmin.setOrganizationDataRetention(actor, req.params.id, req.body || {}));
+  } catch (err) { handleError(err, res); }
+});
+
+router.post("/organizations/:id/data-retention/preview", async (req, res) => {
+  try { res.json(await platformAdmin.previewOrganizationRetention(req.params.id)); }
+  catch (err) { handleError(err, res); }
+});
+
+router.get("/organizations/:id/backup", async (req, res) => {
+  try { res.json(await platformAdmin.getOrganizationBackupStatus(req.params.id)); }
+  catch (err) { handleError(err, res); }
+});
+
+router.put("/organizations/:id/backup", async (req, res) => {
+  try {
+    const actor = { userId: req.userId, userEmail: req.userEmail };
+    res.json(await platformAdmin.setOrganizationBackup(actor, req.params.id, req.body || {}));
+  } catch (err) { handleError(err, res); }
+});
+
+router.post("/organizations/:id/backup", async (req, res) => {
+  try {
+    const actor = { userId: req.userId, userEmail: req.userEmail };
+    res.status(202).json(await platformAdmin.requestOrganizationBackup(actor, req.params.id));
+  } catch (err) { handleError(err, res); }
+});
+
 router.put("/features/:key", async (req, res) => {
   try {
     const actor = { userId: req.userId, userEmail: req.userEmail };
@@ -329,6 +378,9 @@ router.post("/organizations", async (req, res) => {
       billingMethod,
       chargeScope,
       initialRechargeAmountInr: initialRecharge,
+      dataRetentionMode,
+      dataRetentionOverrides,
+      backup,
     });
 
     let tempPassword = null;

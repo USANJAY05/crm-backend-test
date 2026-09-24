@@ -39,6 +39,7 @@ function split(apiObj) {
 async function createOrganizationSetup({
   name, workspaceName, industry, subscriptionPlan, featureFlags, adminEmail, adminName, gcpProject, callProvider,
   billingMethod = "pay_as_you_go", chargeScope = "ai_only", initialRechargeAmountInr = 0,
+  dataRetentionMode = "default", dataRetentionOverrides = {}, backup = null,
 }) {
   const client = await pool.connect(); const orgId = crypto.randomUUID();
   const cloudProjectId = `orgcloud_${orgId}_vertex_ai`; const memberId = adminEmail ? crypto.randomUUID() : null; const now = new Date().toISOString();
@@ -47,7 +48,15 @@ async function createOrganizationSetup({
     const normalizedBillingMethod = billingMethod === "recharge_based" ? "recharge_based" : "pay_as_you_go";
     const normalizedChargeScope = chargeScope === "ai_and_call_provider" ? "ai_and_call_provider" : "ai_only";
     const initialBalance = normalizedBillingMethod === "recharge_based" ? Math.max(0, Number(initialRechargeAmountInr) || 0) : 0;
-    await client.query(`INSERT INTO organizations (id,name,workspace_name,industry,subscription_plan,feature_flags,billing_method,charge_scope,recharge_balance_inr,recharge_reserved_inr,created_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`, [orgId,name,workspaceName,industry||"lending",subscriptionPlan||"Starter",JSON.stringify(featureFlags||[]),normalizedBillingMethod,normalizedChargeScope,initialBalance,0,now]);
+    const orgSettings = {
+      dataRetention: {
+        mode: dataRetentionMode === "custom" ? "custom" : "default",
+        overrides: dataRetentionMode === "custom" && dataRetentionOverrides && typeof dataRetentionOverrides === "object" ? dataRetentionOverrides : {},
+        updatedAt: now,
+      },
+      ...(backup && typeof backup === "object" ? { dataBackup: backup } : {}),
+    };
+    await client.query(`INSERT INTO organizations (id,name,workspace_name,industry,subscription_plan,feature_flags,billing_method,charge_scope,recharge_balance_inr,recharge_reserved_inr,settings,created_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`, [orgId,name,workspaceName,industry||"lending",subscriptionPlan||"Starter",JSON.stringify(featureFlags||[]),normalizedBillingMethod,normalizedChargeScope,initialBalance,0,JSON.stringify(orgSettings),now]);
     await client.query(`INSERT INTO organization_cloud_projects (id,organization_id,organization_name,provider,purpose,mode,project_id,project_number,location,credentials_encrypted,status,updated_at) VALUES ($1,$2,$3,'gcp','vertex-ai','existing',$4,$5,$6,$7,'ready',$8)`, [cloudProjectId,orgId,name,gcpProject.projectId,gcpProject.projectNumber||null,gcpProject.location||null,gcpProject.credentialsEncrypted||null,now]);
     if (callProvider) {
       await client.query(`INSERT INTO channels (id,org_id,type,external_id,config,credentials_encrypted,status,created_at) VALUES ($1,$2,$3,$4,$5,$6,'connected',$7) ON DUPLICATE KEY UPDATE external_id=VALUES(external_id),config=VALUES(config),credentials_encrypted=VALUES(credentials_encrypted),status=VALUES(status)`, [crypto.randomUUID(),orgId,callProvider.provider,callProvider.phoneNumber,JSON.stringify({phoneNumber:callProvider.phoneNumber}),encryptJson({authId:callProvider.authId,authToken:callProvider.authToken}),now]);
