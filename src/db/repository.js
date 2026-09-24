@@ -1773,6 +1773,7 @@ module.exports = {
   getCallsDueForRetry,
   claimAutoDialLead,
   claimCallForRetry,
+  recoverStaleRetryClaims,
   getScheduledCallbacks,
   getRetryStatusForOrg,
   hasNewerCallForPhone,
@@ -1817,5 +1818,5 @@ module.exports = {
   // by src/scheduler/localScheduler.js to hold off registering any cron
   // schedule until the database is actually ready.
   ready: supabase.ready,
-  pool: _pool,
-, recoverStaleRetryClaims};
+  pool: _pool
+};
