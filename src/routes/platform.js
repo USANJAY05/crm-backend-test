@@ -307,7 +307,7 @@ router.post("/organizations", async (req, res) => {
       if (emailExists) return res.status(409).json({ error: `A member with email "${adminEmail}" already belongs to an organization.` });
     }
 
-    const orgFeatureFlags = Array.isArray(featureFlags) ? featureFlags : [];
+    const orgFeatureFlags = await platformAdmin.sanitizeFeatureKeys(Array.isArray(featureFlags) ? featureFlags : []);
     if (!["pay_as_you_go", "recharge_based"].includes(billingMethod)) {
       return res.status(400).json({ error: "Invalid billing method." });
     }
@@ -482,12 +482,13 @@ router.put("/organizations/:id/features", async (req, res) => {
     const { id } = req.params;
     const { featureFlags } = req.body || {};
     if (!Array.isArray(featureFlags)) return res.status(400).json({ error: "featureFlags must be an array of flag keys" });
+    const sanitizedFeatureFlags = await platformAdmin.sanitizeFeatureKeys(featureFlags);
     const org = await db.getOrg(id);
     if (!org) return res.status(404).json({ error: "Organization not found" });
     const supabase = require("../db/client");
-    await supabase.from("organizations").update({ feature_flags: featureFlags }).eq("id", id);
-    await auditLog.record(null, { userId: req.userId, userEmail: req.userEmail }, "platform.org.features.update", "organization", id, { featureFlags });
-    res.json({ success: true, featureFlags });
+    await supabase.from("organizations").update({ feature_flags: sanitizedFeatureFlags }).eq("id", id);
+    await auditLog.record(null, { userId: req.userId, userEmail: req.userEmail }, "platform.org.features.update", "organization", id, { featureFlags: sanitizedFeatureFlags });
+    res.json({ success: true, featureFlags: sanitizedFeatureFlags });
   } catch (err) {
     handleError(err, res);
   }
