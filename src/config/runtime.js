@@ -22,7 +22,7 @@ function validateRuntimeConfig(env = process.env, { mode = "api" } = {}) {
   const warnings = [];
   const production = env.NODE_ENV === "production";
   const queueProvider = String(env.QUEUE_PROVIDER || "memory").toLowerCase();
-  const schedulerProvider = String(env.SCHEDULER_PROVIDER || (mode === "scheduler" ? "local" : "none")).toLowerCase();
+  const schedulerProvider = String(env.SCHEDULER_PROVIDER || (mode === "scheduler" ? "bullmq" : "none")).toLowerCase();
 
   if (mode === "api" || mode === "scheduler") requiredDatabase(env, errors);
 
@@ -37,7 +37,7 @@ function validateRuntimeConfig(env = process.env, { mode = "api" } = {}) {
   }
 
   if (mode === "scheduler") {
-    if (!["local", "oci", "oci_resource_scheduler", "eventbridge", "aws_eventbridge"].includes(schedulerProvider)) {
+    if (!["bullmq", "local", "oci", "oci_resource_scheduler", "eventbridge", "aws_eventbridge"].includes(schedulerProvider)) {
       errors.push(`Unsupported SCHEDULER_PROVIDER="${schedulerProvider}"`);
     }
     if (production && ["local"].includes(schedulerProvider)) {
