@@ -20,7 +20,8 @@ const log = getLogger("routes.vobiz");
 const {
   vobizCallNumbers, vobizCallCallee, vobizCallOrgs, vobizCallDirection,
   vobizCallUuidToInternalId, vobizMachineDetectedCalls,
-  vobizCallAttemptNumber, vobizCallRetryContext, vobizCallFinalizers, createVobizStreamToken
+  vobizCallAttemptNumber, vobizCallRetryContext, vobizCallFinalizers, createVobizStreamToken,
+  aliasVobizCallState, collectVobizCallIds, findCachedCallIdByPhone, syncDialerProviderCallSid
 } = require("../telephony/vobizProxy");
 
 // Webhook fired for BOTH genuine inbound calls AND as the answer_url for
@@ -34,11 +35,17 @@ router.post("/incoming", requireVobizWebhook, async (req, res) => {
 
   log.info(`🔎 Vobiz /incoming webhook — CallUUID="${CallUUID}" From="${String(From || "").replace(/.(?=.{4})/g, "*")}" To="${String(To || "").replace(/.(?=.{4})/g, "*")}"`);
 
+  const aliasedFromPhone = findCachedCallIdByPhone(To) || findCachedCallIdByPhone(From);
+  aliasVobizCallState([CallUUID, aliasedFromPhone, ...collectVobizCallIds(req.body), ...collectVobizCallIds(req.query)]);
+  if (CallUUID) {
+    syncDialerProviderCallSid(CallUUID).catch((err) => log.error("❌ Failed to sync campaign CallUUID:", err.message));
+  }
+
   if (CallUUID && From) {
     vobizCallNumbers.set(CallUUID, From);
     setTimeout(() => vobizCallNumbers.delete(CallUUID), 1800000);
   }
-  if (CallUUID && To) {
+  if (CallUUID && To && !vobizCallCallee.has(CallUUID)) {
     vobizCallCallee.set(CallUUID, To);
     setTimeout(() => vobizCallCallee.delete(CallUUID), 1800000);
   }
@@ -81,7 +88,14 @@ router.post("/incoming", requireVobizWebhook, async (req, res) => {
     // org before awaiting it. The captured value is also used by the
     // fallback and authoritative-duration paths below.
     vobizCallFinalizers.finalize(CallUUID)
-      .then((finalized) => {
+      .then(async (finalized) => {
+        if (!finalized) {
+          // Media `start` can arrive a beat after Hangup. Give the stream
+          // a short window to register and run the real recording + post-call
+          // path before writing a recording-less fallback row.
+          await new Promise((resolve) => setTimeout(resolve, 2500));
+          finalized = await vobizCallFinalizers.finalize(CallUUID);
+        }
         if (finalized) return; // finalizeCall() already handled this call for real
         if (!hangupOrgId) return; // not one of ours, or its cache entry expired
 
@@ -91,19 +105,23 @@ router.post("/incoming", requireVobizWebhook, async (req, res) => {
         const retryContext = vobizCallRetryContext.get(CallUUID) || null;
         const isMachineDetected = vobizMachineDetectedCalls.has(CallUUID);
         const duration = parseInt(req.body.Duration, 10) || 0;
-        const status = isMachineDetected
-          ? "Answering Machine"
-          : req.body.CallStatus === "completed"
-            ? "Completed"
-            : (req.body.CallStatus || req.body.HangupCauseName || "Failed");
+        // Never persist "Completed" without a media session: there is no
+        // recording, transcript, busy-callback, or enquiry to attach, and
+        // the campaign treats Completed as "this lead is done".
+        const status = isMachineDetected ? "Answering Machine" : "No Answer";
         const fallbackId = `call_vobiz_fallback_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
 
         db.create("calllogs", orgId, {
-          id: fallbackId, leadName: calleeNumber, duration,
-          status, direction: "outbound",
+          id: fallbackId,
+          leadName: calleeNumber,
+          callerNumber: calleeNumber,
+          duration,
+          status,
+          direction: "outbound",
           createdAt: new Date().toISOString(),
           providerCallSid: CallUUID,
-          ...db.computeRetryFields(attemptNumber), retryContext
+          ...db.computeRetryFields(attemptNumber),
+          retryContext
         }).then((savedLog) => {
           global.broadcastLog(`📞 Vobiz call ended without a media session ever registering (${status}): ${calleeNumber}`, {
             type: "call_completed", orgId, callLog: savedLog, providerCallSid: CallUUID

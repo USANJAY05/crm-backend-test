@@ -241,6 +241,27 @@ async function processTask(task) {
 
   const pendingLeadId = nextPendingLeadId(task);
   if (!pendingLeadId) {
+    const results = task.callResults || {};
+    const hasPendingCallbacks = (task.leadIds || []).some((leadId) => {
+      const r = results[leadId];
+      return r && r.status === "Callback Scheduled";
+    });
+
+    if (hasPendingCallbacks) {
+      if (task.autoDialStatus !== "waiting_for_callbacks") {
+        await db.patch("dialertasks", orgId, taskId, {
+          autoDialStatus: "waiting_for_callbacks",
+          nextDialAt: new Date(Date.now() + 60000).toISOString(),
+        });
+        if (global.broadcastLog) {
+          global.broadcastLog(`🤖 Auto-dial task "${task.name}" waiting for scheduled callbacks.`, {
+            type: "auto_dial_progress", orgId, taskId, status: "waiting_for_callbacks",
+          });
+        }
+      }
+      return;
+    }
+
     await db.patch("dialertasks", orgId, taskId, { autoDialEnabled: false, autoDialStatus: "completed" });
     if (global.broadcastLog) {
       global.broadcastLog(`🤖 Auto-dial task "${task.name}" completed — every lead has been dialed.`, {

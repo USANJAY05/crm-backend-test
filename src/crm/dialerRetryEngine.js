@@ -144,7 +144,8 @@ async function handlePlaceRedialJob(data) {
     await db.patch("calllogs", orgId, rowId, { retryStatus: "retried" });
   } catch (err) {
     log.error(`❌ [dialerRetryEngine] Redial placement failed for ${leadName} (org ${orgId}):`, err.message);
-    await db.patch("calllogs", orgId, rowId, { retryStatus: "exhausted" }).catch(() => {});
+    const retryFields = db.computeRetryFields(attemptNumber);
+    await db.patch("calllogs", orgId, rowId, retryFields).catch(() => {});
   }
 }
 

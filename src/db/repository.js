@@ -885,13 +885,13 @@ async function hasNewerCallForPhone(orgId, phone, sinceIso, excludeId) {
   // by id client-side instead of relying on a strict "greater than".
   const { data, error } = await supabase
     .from("call_logs")
-    .select("id, lead_name, created_at")
+    .select("id, lead_name, caller_number, created_at")
     .eq("org_id", orgId)
     .gte("created_at", sinceIso);
   if (error) throw new Error(`[db.hasNewerCallForPhone] ${error.message}`);
   const last10 = digits.slice(-10);
   return (data || []).some((row) =>
-    row.id !== excludeId && String(row.lead_name || "").replace(/[^\d]/g, "").endsWith(last10)
+    row.id !== excludeId && String(row.caller_number || row.lead_name || "").replace(/[^\d]/g, "").endsWith(last10)
   );
 }
 

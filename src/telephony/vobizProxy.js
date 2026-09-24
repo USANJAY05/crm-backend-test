@@ -268,6 +268,104 @@ const vobizPrewarmedSetup = new Map();
 // not spend the first part of the caller's conversation resolving project
 // credentials and constructing the Vertex client.
 const vobizPrewarmedClients = new Map();
+
+const CALL_CACHE_TTL_MS = 1_800_000;
+
+function uniqueCallIds(...values) {
+  const ids = [];
+  for (const value of values) {
+    if (value == null || value === "") continue;
+    const id = String(value);
+    if (id && !ids.includes(id)) ids.push(id);
+  }
+  return ids;
+}
+
+function collectVobizCallIds(source = {}) {
+  return uniqueCallIds(
+    source.CallUUID, source.callUUID, source.callId, source.CallSid, source.sid,
+    source.request_uuid, source.requestUuid, source.RequestUUID,
+    source.api_id, source.apiId
+  );
+}
+
+function rememberMap(map, id, value) {
+  map.set(id, value);
+  setTimeout(() => map.delete(id), CALL_CACHE_TTL_MS);
+}
+
+function copyMapAcrossIds(map, ids) {
+  let value;
+  for (const id of ids) {
+    if (map.has(id)) { value = map.get(id); break; }
+  }
+  if (value === undefined) return;
+  for (const id of ids) rememberMap(map, id, value);
+}
+
+function copySetAcrossIds(set, ids) {
+  if (!ids.some((id) => set.has(id))) return;
+  for (const id of ids) {
+    set.add(id);
+    setTimeout(() => set.delete(id), CALL_CACHE_TTL_MS);
+  }
+}
+
+// Vobiz's outbound Call API and later webhooks/media events often use
+// different id fields (request_uuid vs CallUUID). Copy every in-memory
+// cache onto every known alias so finalize, Hangup, and auto-dial all
+// see the same org, retryContext, and direction.
+function aliasVobizCallState(ids) {
+  const all = uniqueCallIds(...ids);
+  if (!all.length) return all;
+  copyMapAcrossIds(vobizCallOrgs, all);
+  copyMapAcrossIds(vobizCallDirection, all);
+  copyMapAcrossIds(vobizCallAttemptNumber, all);
+  copyMapAcrossIds(vobizCallRetryContext, all);
+  copyMapAcrossIds(vobizCallNumbers, all);
+  copyMapAcrossIds(vobizCallCallee, all);
+  copyMapAcrossIds(vobizCallUuidToInternalId, all);
+  copyMapAcrossIds(vobizPrewarmedSetup, all);
+  copyMapAcrossIds(vobizPrewarmedClients, all);
+  copySetAcrossIds(vobizMachineDetectedCalls, all);
+  return all;
+}
+
+function rememberOutboundCall(ids, { orgId, direction, attemptNumber, retryContext, fromNumber, toNumber }) {
+  const all = uniqueCallIds(...ids);
+  for (const id of all) {
+    if (orgId) rememberMap(vobizCallOrgs, id, orgId);
+    if (direction) rememberMap(vobizCallDirection, id, direction);
+    if (attemptNumber) rememberMap(vobizCallAttemptNumber, id, attemptNumber);
+    if (retryContext) rememberMap(vobizCallRetryContext, id, retryContext);
+    if (fromNumber) rememberMap(vobizCallNumbers, id, fromNumber);
+    if (toNumber) rememberMap(vobizCallCallee, id, toNumber);
+  }
+  return all;
+}
+
+function findCachedCallIdByPhone(phone) {
+  const last10 = String(phone || "").replace(/\D/g, "").slice(-10);
+  if (!last10) return null;
+  for (const [id, callee] of vobizCallCallee.entries()) {
+    if (String(callee || "").replace(/\D/g, "").endsWith(last10)) return id;
+  }
+  for (const [id, from] of vobizCallNumbers.entries()) {
+    if (String(from || "").replace(/\D/g, "").endsWith(last10)) return id;
+  }
+  return null;
+}
+async function syncDialerProviderCallSid(providerCallSid) {
+  const retryContext = vobizCallRetryContext.get(providerCallSid);
+  const orgId = vobizCallOrgs.get(providerCallSid);
+  if (!providerCallSid || !orgId || !retryContext?.taskId) return;
+  try {
+    await db.patch("dialertasks", orgId, retryContext.taskId, { currentProviderCallSid: providerCallSid });
+  } catch (err) {
+    log.error(`❌ Failed to sync dialer providerCallSid ${providerCallSid}:`, err.message);
+  }
+}
+
 setInterval(() => {
   // Belt-and-suspenders cleanup in case a call's own TTL cleanup (set where
   // each entry is created) never runs — mirrors the 30-minute horizon used
@@ -485,23 +583,22 @@ async function triggerVobizOutboundCall(orgId, phoneNumber, { questions, from, l
   }
 
   log.info(`✅ Outbound Vobiz call initiated. Response:`, JSON.stringify(data));
-  const callSid = data.request_uuid || data.api_id || data.callId || data.callUUID || data.sid || "vobiz_outbound";
-  vobizCallOrgs.set(callSid, orgId);
-  setTimeout(() => vobizCallOrgs.delete(callSid), 1800000);
-  vobizCallDirection.set(callSid, "outbound");
-  setTimeout(() => vobizCallDirection.delete(callSid), 1800000);
-  vobizCallAttemptNumber.set(callSid, attemptNumber);
-  setTimeout(() => vobizCallAttemptNumber.delete(callSid), 1800000);
-  // taskId/leadId (when this call was placed for a dialer task — see
-  // autoDialEngine.js and the manual-dial /api/vobiz/call route) ride
-  // along here so callFinalizer.js can patch that task's callResults for
-  // this lead when the call finishes, and so a later automatic redial
-  // (dialerRetryEngine.js — a "No Answer" retry, or a "call me back at
-  // 6pm" callback; see callbackRequested below) still knows which task
-  // row to update even though the redial happens completely independently
-  // of whatever originally placed this call.
-  vobizCallRetryContext.set(callSid, { questions, from, language, assignedContact, taskId, leadId });
-  setTimeout(() => vobizCallRetryContext.delete(callSid), 1800000);
+  // Prefer the same identifiers the media WS / Hangup webhook will send
+  // (CallUUID / callId) over request_uuid, and remember every alias so a
+  // later webhook using a different field still finds org + retryContext.
+  const responseCallIds = collectVobizCallIds(data);
+  const callSids = rememberOutboundCall(
+    responseCallIds.length ? responseCallIds : [`vobiz_outbound_${Date.now()}`],
+    {
+      orgId,
+      direction: "outbound",
+      attemptNumber,
+      retryContext: { questions, from, language, assignedContact, taskId, leadId },
+      fromNumber: sanitizedFrom,
+      toNumber: sanitizedTo,
+    }
+  );
+  const callSid = responseCallIds[0] || callSids[0];
 
   // Pre-warm org/agent/questionnaire/KB lookups now, while the callee's phone
   // is still ringing, instead of waiting for the "start" handler to do it
@@ -514,8 +611,7 @@ async function triggerVobizOutboundCall(orgId, phoneNumber, { questions, from, l
     log.error("❌ Vobiz Google AI client pre-warm failed, will retry post-answer:", err.message);
     return null;
   });
-  vobizPrewarmedClients.set(callSid, prewarmedClientPromise);
-  setTimeout(() => vobizPrewarmedClients.delete(callSid), 1800000);
+  for (const id of callSids) rememberMap(vobizPrewarmedClients, id, prewarmedClientPromise);
 
   const prewarmPromise = resolveVobizCallSetup(orgId, phoneNumber, null, "outbound", agentId || null, undefined)
     .catch((err) => {
@@ -523,10 +619,9 @@ async function triggerVobizOutboundCall(orgId, phoneNumber, { questions, from, l
       vobizPrewarmedSetup.delete(callSid);
       return null;
     });
-  vobizPrewarmedSetup.set(callSid, prewarmPromise);
-  setTimeout(() => vobizPrewarmedSetup.delete(callSid), 1800000);
+  for (const id of callSids) rememberMap(vobizPrewarmedSetup, id, prewarmPromise);
 
-  return { success: true, callSid };
+  return { success: true, callSid, callSids };
 }
 
 function getWavHeader(dataLength, sampleRate = 16000, channels = 1, bitsPerSample = 16) {
@@ -705,6 +800,7 @@ async function handleVobizSession(vobizWs, streamContext = null) {
             return;
           }
           vobizCallOrgs.set(callId, authorizedOrgId);
+          aliasVobizCallState([callId, authorizedCallId]);
           log.info(`🚀 Vobiz Stream started: ${streamId} | CallId: ${callId} | Org: ${authorizedOrgId}`);
           vobizCallFinalizers.register(callId, finalizeCall);
           vobizCallUuidToInternalId.set(callId, generatedCallId);
@@ -1098,16 +1194,20 @@ If the tool result has 'deferred: true', tell the caller their personalized quot
     endRecording();
     const duration = Math.round((Date.now() - startTime) / 1000);
     if (!recordStreamClosed) {
-      await new Promise((resolve) => {
-        const onFinish = () => { cleanup(); resolve(); };
-        const onError = () => { cleanup(); resolve(); };
-        const cleanup = () => {
-          recordStream.off("finish", onFinish);
-          recordStream.off("error", onError);
-        };
-        recordStream.once("finish", onFinish);
-        recordStream.once("error", onError);
-      });
+      const RECORD_FINISH_TIMEOUT_MS = 5000;
+      await Promise.race([
+        new Promise((resolve) => {
+          const onFinish = () => { cleanup(); resolve(); };
+          const onError = () => { cleanup(); resolve(); };
+          const cleanup = () => {
+            recordStream.off("finish", onFinish);
+            recordStream.off("error", onError);
+          };
+          recordStream.once("finish", onFinish);
+          recordStream.once("error", onError);
+        }),
+        new Promise((resolve) => setTimeout(resolve, RECORD_FINISH_TIMEOUT_MS)),
+      ]);
     }
 
     // Retrieve caller phone number and resolved org (if any) from cache
@@ -1175,11 +1275,16 @@ If the tool result has 'deferred: true', tell the caller their personalized quot
       }
     }
 
+    const workflowQuestions = sanitizedCalleeForFinalize
+      ? postCallAgents.normalizeQuestions(vobizCallQuestions.get(sanitizedCalleeForFinalize))
+      : null;
+
     postCallQueue.enqueue("finalizeCall:vobiz", {
       callId: generatedCallId, callerNumber, recordingUrl, durationSeconds: duration,
       transcriptLines, activeConfig, liveInputTokens, liveOutputTokens,
       totalInboundAudioBytes, totalOutboundAudioBytes, orgId, direction,
       isMachineDetected, attemptNumber, retryContext, sanitizedCallee: sanitizedCalleeForFinalize,
+      workflowQuestions,
       // Vobiz's own CallUUID (the WS "start" payload's callId, NOT
       // generatedCallId above) — this is the exact same id the frontend
       // already holds as vobizCallSid the moment it dials (see
@@ -2075,6 +2180,7 @@ async function processPostCallData({
   liveInputTokens, liveOutputTokens, totalInboundAudioBytes, totalOutboundAudioBytes,
   orgId = null, direction = "unknown", isMachineDetected = false, attemptNumber = 1,
   retryContext = null, sanitizedCallee = null, providerCallSid = null,
+  workflowQuestions = null,
 }) {
   callerNumber = normalizePhone(callerNumber);
 
@@ -2119,54 +2225,8 @@ async function processPostCallData({
       sentimentOutputTokens += outputTokens || 0;
     });
     if (followUp.callerName) extractedCallerName = followUp.callerName;
-    // followUpPromised is true for BOTH a generic human hand-off ("someone
-    // from our team will call you") AND a caller-requested callback ("I'm
-    // busy, call me later") — the agent typically says something like "no
-    // problem, I'll call you back" for the latter too, which satisfies
-    // followUpPromised on its own. Without the callbackRequested guard,
-    // every "I'm busy" call got BOTH a proper "Callback Scheduled" status
-    // + automatic redial (callFinalizer.js, driven by callbackRequested)
-    // AND a duplicate generic enquiry logged here — confusing, and wrong:
-    // a caller who explicitly asked for an AI callback isn't raising a
-    // new enquiry for a human to follow up on, they're just asking for
-    // another automated attempt. Only log an enquiry for the OTHER case —
-    // a promised follow-up that ISN'T already being handled as a callback.
-    //
-    // Same rule for both directions: followUpPromised (see the follow-up-
-    // safety-net prompt) is ALREADY specifically "the caller asked
-    // something the agent genuinely couldn't answer" — that's the one and
-    // only definition of an enquiry, not a mood/tone judgment. Used to
-    // also require sentiment === "Negative" on outbound calls specifically,
-    // as a proxy for "the caller was actually unhappy" — but sentiment is
-    // a blunt, indirect signal (a caller can be perfectly pleasant while
-    // still asking something the agent has no answer for, and vice versa)
-    // and double-counting it here just made real unresolved questions on
-    // outbound calls silently vanish whenever the tone happened to read as
-    // Positive/Neutral. A successful outbound call — caller agreed,
-    // scheduled something, answered the questionnaire, or simply wasn't
-    // interested — never sets followUpPromised in the first place (the
-    // prompt explicitly excludes those), so it was never at risk of being
-    // misfiled as an enquiry either way; removing the sentiment gate only
-    // changes the genuinely-unresolved-question case to actually surface.
-    // A real callback/follow-up time (from callbackRequested) still never
-    // counts as an enquiry — that's the separate "Callback Scheduled"
-    // path below, which stores the time on the lead/dialer task directly.
-    const enquiryEligible = followUp.followUpPromised && !followUp.callbackRequested;
-    if (enquiryEligible) {
-      try {
-        const { data: existing } = await db.supabase.from("enquiries").select("id").eq("call_id", callId).limit(1);
-        if (!existing || existing.length === 0) {
-          await handleSaveEnquiry(orgId, callId, {
-            name: extractedCallerName,
-            phone: callerNumber,
-            query_text: followUp.querySummary || "Caller requested a follow-up."
-          }, callerNumber);
-          log.info(`✅ Follow-up safety net: saved enquiry for call ${callId} (AI promised a callback but never called save_enquiry)`);
-        }
-      } catch (err) {
-        log.error("❌ Follow-up safety net error:", err.message);
-      }
-    }
+    // Enquiry persistence lives in callFinalizer.resolvePostCallOutcome so a
+    // busy/callback from either post-call agent cannot also create an enquiry.
   }
 
   // Combined token calculation for BOTH models
@@ -2213,7 +2273,7 @@ async function processPostCallData({
     recordingUrl,
     transcriptLines,
     extractedCallerName,
-    getWorkflowQuestions: () => sanitizedCallee ? postCallAgents.normalizeQuestions(vobizCallQuestions.get(sanitizedCallee)) : null,
+    getWorkflowQuestions: () => workflowQuestions || (sanitizedCallee ? postCallAgents.normalizeQuestions(vobizCallQuestions.get(sanitizedCallee)) : null),
     isMachineDetected,
     attemptNumber,
     retryContext,
@@ -2491,6 +2551,7 @@ async function extractContactAndTrigger(
 
 module.exports = {
   handleVobizSession, vobizCallNumbers, vobizCallCallee, vobizCallQuestions, vobizCallTaskConfig, vobizCallOrgs, vobizCallDirection, vobizCallUuidToInternalId, vobizMachineDetectedCalls, vobizCallAttemptNumber, vobizCallRetryContext, vobizCallFinalizers, triggerVobizOutboundCall, vobizPrewarmedClients,
+  aliasVobizCallState, collectVobizCallIds, findCachedCallIdByPhone, syncDialerProviderCallSid,
   // Exported additionally so services/vobizPipeline.js (STT->LLM->TTS engine)
   // can reuse the exact same tool-call handlers, post-call processing, and
   // audio helpers instead of duplicating them and risking drift.

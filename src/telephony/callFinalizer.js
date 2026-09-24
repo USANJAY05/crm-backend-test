@@ -34,20 +34,72 @@ const log = getLogger("telephony.callFinalizer");
 // provider's finalizeCall() must call this ONCE, synchronously, before
 // enqueueing the rest of the pipeline, and pass the resulting recordingUrl
 // (a plain string — safe to carry in a queued job's data) into the queue.
+function usableCallbackTime(iso) {
+  const parsed = iso ? new Date(iso) : null;
+  if (!parsed || Number.isNaN(parsed.getTime()) || parsed.getTime() <= Date.now()) return null;
+  return parsed.toISOString();
+}
+
+const DEFAULT_CALLBACK_DELAY_MS = 2 * 60 * 60 * 1000;
+
+// One decision for busy-callback vs human enquiry. Either post-call agent
+// requesting a callback wins; enquiry is only saved when neither does.
+function resolvePostCallOutcome({ followUp, postCallSummary, isMachineDetected, attemptNumber = 1, retryContext }) {
+  const fu = followUp || {};
+  const summary = postCallSummary || null;
+  const isCallbackDesired = !!(!isMachineDetected && (fu.callbackRequested || summary?.callbackRequested));
+  const maxAttempts = db.MAX_RETRY_ATTEMPTS || 3;
+  const isCallbackExhausted = isCallbackDesired && attemptNumber >= maxAttempts;
+  const callbackRequested = isCallbackDesired && !isCallbackExhausted;
+  const enquiryRequested = (!isCallbackDesired || isCallbackExhausted) && !!(fu.followUpPromised || summary?.enquiryRequested || (isCallbackExhausted && (fu.querySummary || summary?.querySummary)));
+  const callbackTimeToStore = usableCallbackTime(fu.callbackTime) || usableCallbackTime(summary?.callbackTime);
+  const callbackReasonToStore = fu.querySummary || summary?.querySummary || null;
+  const enquirySummary = summary?.querySummary || fu.querySummary || (isCallbackExhausted ? "Maximum callback attempts reached; customer was previously busy" : null);
+  const callerName = summary?.callerName || fu.callerName || null;
+  let finalStatus = "Completed";
+  let retryFieldsToSave = {};
+  if (isMachineDetected) {
+    finalStatus = "Answering Machine";
+    retryFieldsToSave = { ...db.computeRetryFields(attemptNumber), retryContext };
+  } else if (callbackRequested) {
+    finalStatus = "Callback Scheduled";
+    retryFieldsToSave = {
+      attemptNumber,
+      retryStatus: "pending",
+      nextRetryAt: callbackTimeToStore || new Date(Date.now() + DEFAULT_CALLBACK_DELAY_MS).toISOString(),
+      retryContext,
+    };
+  } else if (isCallbackExhausted) {
+    finalStatus = "Completed";
+    retryFieldsToSave = {
+      attemptNumber,
+      retryStatus: "exhausted",
+      nextRetryAt: null,
+      retryContext,
+    };
+  }
+  return {
+    finalStatus, callbackRequested, enquiryRequested, callbackTimeToStore,
+    callbackReasonToStore, enquirySummary, callerName, retryFieldsToSave,
+  };
+}
+
 async function uploadRecording(provider, callId, wavBuffer) {
   if (!storage.isConfigured()) {
     log.warn(`⚠️  [${provider}] recording not saved — STORAGE_ACCESS_KEY / STORAGE_SECRET_KEY / STORAGE_BUCKET are not set.`);
     return null;
   }
   if (!wavBuffer || wavBuffer.length <= 44) return null; // header-only/empty — nothing to upload
-  try {
-    const url = await storage.upload(`recordings/${callId}.wav`, wavBuffer, { contentType: "audio/wav" });
-    log.info(`💾 [${provider}] recording uploaded: ${url}`);
-    return url;
-  } catch (err) {
-    log.error(`❌ [${provider}] upload error:`, err.message);
-    return null;
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    try {
+      const url = await storage.upload(`recordings/${callId}.wav`, wavBuffer, { contentType: "audio/wav" });
+      log.info(`💾 [${provider}] recording uploaded: ${url}`);
+      return url;
+    } catch (err) {
+      log.error(`❌ [${provider}] upload error (attempt ${attempt}/2):`, err.message);
+    }
   }
+  return null;
 }
 
 // Gemini Live's incremental transcription pushes one entry per word/syllable
@@ -283,29 +335,6 @@ async function finalizeCallRecord({
   }
   followUp = followUp || { followUpPromised: false, callerName: null, querySummary: null, callbackRequested: false, callbackTime: null };
 
-  let finalStatus = isMachineDetected ? "Answering Machine" : "Completed";
-  let callbackTimeToStore = null;
-  let callbackReasonToStore = null;
-  let retryFieldsToSave = {};
-  if (isMachineDetected) {
-    retryFieldsToSave = { ...db.computeRetryFields(attemptNumber), retryContext };
-  } else if (followUp.callbackRequested) {
-    finalStatus = "Callback Scheduled";
-    const parsed = followUp.callbackTime ? new Date(followUp.callbackTime) : null;
-    const parsedIsUsable = parsed && !Number.isNaN(parsed.getTime()) && parsed.getTime() > Date.now();
-    // No time given, or one that's unparseable/already in the past — still
-    // schedule a redial rather than dropping the callback on the floor,
-    // just with a generic delay instead of the caller's actual preference.
-    callbackTimeToStore = parsedIsUsable ? parsed.toISOString() : null;
-    callbackReasonToStore = followUp.querySummary || null;
-    retryFieldsToSave = {
-      attemptNumber,
-      retryStatus: "pending",
-      nextRetryAt: parsedIsUsable ? parsed.toISOString() : new Date(Date.now() + 2 * 60 * 60 * 1000).toISOString(),
-      retryContext,
-    };
-  }
-
   // Prefer answers already saved live during the call (real-time tool calls);
   // only fall back to post-hoc transcript extraction if none were saved.
   // Computed BEFORE the summary/sentiment below (moved ahead of both) so
@@ -351,50 +380,34 @@ async function finalizeCallRecord({
     }
     if (postCallSummary) {
       aiSummary = postCallSummary.text;
+    }
+  }
 
-      // The structured post-call summary is the canonical outcome. This is
-      // especially important for callback/redial calls: the callback and
-      // enquiry decisions must be made from the complete finished-call
-      // summary, not from whichever live function call happened to fire.
-      if (postCallSummary.callbackRequested) {
-        finalStatus = isMachineDetected ? "Answering Machine" : "Callback Scheduled";
-        if (!isMachineDetected) {
-          const parsed = postCallSummary.callbackTime ? new Date(postCallSummary.callbackTime) : null;
-          const usable = parsed && !Number.isNaN(parsed.getTime()) && parsed.getTime() > Date.now();
-          callbackTimeToStore = usable ? parsed.toISOString() : null;
-          callbackReasonToStore = postCallSummary.querySummary || callbackReasonToStore || null;
-          retryFieldsToSave = {
-            attemptNumber,
-            retryStatus: "pending",
-            nextRetryAt: usable ? parsed.toISOString() : new Date(Date.now() + 2 * 60 * 60 * 1000).toISOString(),
-            retryContext,
-          };
-        }
-      }
+  const {
+    finalStatus, enquiryRequested, callbackTimeToStore, callbackReasonToStore,
+    enquirySummary, retryFieldsToSave, callerName: outcomeCallerName,
+  } = resolvePostCallOutcome({
+    followUp, postCallSummary, isMachineDetected, attemptNumber, retryContext,
+  });
 
-      // Save a human-follow-up enquiry from the same canonical outcome when
-      // the summary says the AI could not resolve the caller's question.
-      // Callback always wins, so one call cannot become both outcomes.
-      if (!postCallSummary.callbackRequested && postCallSummary.enquiryRequested && postCallSummary.querySummary) {
+  if (enquiryRequested && enquirySummary) {
         try {
           const existing = await db.list("enquiries", orgId);
           const alreadySaved = (existing || []).some(e => String(e.callId || e.call_id || "") === String(callId));
           if (!alreadySaved) {
             await db.create("enquiries", orgId, {
               callId,
-              name: postCallSummary.callerName || resolvedLeadName || null,
+              name: outcomeCallerName || resolvedLeadName || null,
               phone: callerNumber || null,
-              queryText: postCallSummary.querySummary,
+              queryText: enquirySummary,
               status: "new",
               createdAt: new Date().toISOString(),
             });
-            log.info(`✅ [${provider}] Post-call summary saved enquiry for call ${callId}`);
+            log.info(`✅ [${provider}] Post-call saved enquiry for call ${callId}`);
           }
         } catch (err) {
-          log.error(`❌ [${provider}] Post-call summary enquiry save failed:`, err.message);
+          log.error(`❌ [${provider}] Post-call enquiry save failed:`, err.message);
         }
-      }
-    }
   }
 
   // This used to be fire-and-forget (db.create(...).then().catch(), never
@@ -582,4 +595,4 @@ async function finalizeCallRecord({
   return { fullTranscript, mergedTranscriptLines };
 }
 
-module.exports = { finalizeCallRecord, mergeTranscriptLines, buildFullTranscript, uploadRecording, saveContactDetailsNow };
+module.exports = { finalizeCallRecord, mergeTranscriptLines, buildFullTranscript, uploadRecording, saveContactDetailsNow, resolvePostCallOutcome };

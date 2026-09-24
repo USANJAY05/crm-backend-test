@@ -179,7 +179,7 @@ router.post("/dialer-tasks/:id/auto-dial/start", requireAuth, async (req, res) =
 
     const hasPending = (task.leadIds || []).some((leadId) => {
       const r = task.callResults && task.callResults[leadId];
-      return !r || r.status === "Pending";
+      return !r || r.status === "Pending" || r.status === "Callback Scheduled";
     });
     if (!hasPending) return res.status(400).json({ error: "Every lead in this task has already been dialed." });
 
