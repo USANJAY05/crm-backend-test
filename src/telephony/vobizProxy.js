@@ -461,14 +461,17 @@ async function resolveVobizCallSetup(resolvedOrgId, calleeNumber, resolvedPhone,
   const effectiveConfig = resolvedConfig || getConfig();
   kbMode = effectiveConfig.knowledgeBaseMode ?? "all";
   kbDocumentIds = kbMode === "specific" ? (effectiveConfig.knowledgeBaseDocumentIds || []) : null;
-  knowledgeBaseSearchEnabled = kbFeatureEnabled;
+  let inlineKnowledge = null;
   try {
     orgHasKnowledgeBase = kbMode !== "none" && await knowledgeBase.hasContent(resolvedOrgId, kbDocumentIds);
+    if (orgHasKnowledgeBase && knowledgeBaseSearchEnabled) {
+      inlineKnowledge = await knowledgeBase.getAllContent(resolvedOrgId, kbDocumentIds).catch(() => null);
+    }
   } catch (err) {
     log.error("❌ Failed to check knowledge base for Vobiz call org:", err.message);
   }
 
-  return { customObjects, orgHasKnowledgeBase, kbMode, kbDocumentIds, companyInfoPrompt, knowledgeBaseSearchEnabled, questionsList, orgName: resolvedOrgName, callerContactName: knownContactName, activeConfig: resolvedConfig, voiceName: resolvedVoiceName };
+  return { customObjects, orgHasKnowledgeBase, kbMode, kbDocumentIds, companyInfoPrompt, knowledgeBaseSearchEnabled, questionsList, orgName: resolvedOrgName, callerContactName: knownContactName, activeConfig: resolvedConfig, voiceName: resolvedVoiceName, inlineKnowledge };
 }
 
 async function triggerVobizOutboundCall(orgId, phoneNumber, { questions, from, language, assignedContact, baseUrl, attemptNumber = 1, starhealthEnabled = false, agentId, taskId = null, leadId = null } = {}) {
@@ -841,15 +844,20 @@ async function handleVobizSession(vobizWs, streamContext = null) {
           let knowledgeBaseSearchEnabled = false;
           let preloadedQuestions = genericFallbackQuestions;
 
-          // Start tenant-scoped Gemini client and feature-flag resolution immediately
-          // after the Vobiz start event. These operations do not depend on the final
-          // prompt, so running them here hides their network latency behind the
-          // questionnaire / org / knowledge-base setup work below.
+          // Reuse the Gemini client that was already resolved during ringing
+          // (see triggerVobizOutboundCall → vobizPrewarmedClients). For
+          // inbound calls (or any outbound call whose pre-warm expired/failed)
+          // fall back to resolving now — same as before, just without wasting
+          // the re-resolve on an already-cached client.
           const startupT0 = Date.now();
-          const prewarmedGeminiClientPromise = genai.getClientForOrg(resolvedOrgId).catch((err) => {
-            log.warn(`⚠️ Vobiz Gemini client pre-warm failed; falling back during connect: ${err.message}`);
-            return null;
-          });
+          const hadPrewarmedClient = vobizPrewarmedClients.has(callId);
+          const prewarmedGeminiClientPromise = hadPrewarmedClient
+            ? vobizPrewarmedClients.get(callId)
+            : genai.getClientForOrg(resolvedOrgId).catch((err) => {
+                log.warn(`⚠️ Vobiz Gemini client pre-warm failed; falling back during connect: ${err.message}`);
+                return null;
+              });
+          if (hadPrewarmedClient) vobizPrewarmedClients.delete(callId);
           const prewarmedFeatureFlagsPromise = Promise.all([
             featureFlags.isEnabled("knowledge_base_search"),
             featureFlags.isEnabled("email_documents"),
@@ -859,7 +867,7 @@ async function handleVobizSession(vobizWs, streamContext = null) {
             log.warn(`⚠️ Vobiz feature-flag pre-warm failed; falling back during connect: ${err.message}`);
             return null;
           });
-          log.debug(`⏱️ Vobiz startup pre-warm launched at +${Date.now() - startupT0}ms after start handler entered`);
+          log.debug(`⏱️ Vobiz startup pre-warm launched at +${Date.now() - startupT0}ms after start handler entered (client pre-warmed=${hadPrewarmedClient})`);
 
           const explicitAgentId = sanitizedCallee ? vobizCallAgentId.get(sanitizedCallee) : null;
           if (explicitAgentId) vobizCallAgentId.delete(sanitizedCallee);
@@ -899,11 +907,13 @@ async function handleVobizSession(vobizWs, streamContext = null) {
             // round trip. Only registers the live search tool as a fallback
             // when the content is too large to safely inline (see
             // getAllContent's MAX_INLINE_CHARS cap).
-            let inlineKnowledge = null;
-            try {
-              inlineKnowledge = await knowledgeBase.getAllContent(resolvedOrgId, kbDocumentIds);
-            } catch (err) {
-              log.error("❌ Failed to inline knowledge base for Vobiz call, falling back to live search:", err.message);
+            let inlineKnowledge = setup.inlineKnowledge;
+            if (inlineKnowledge === undefined) {
+              try {
+                inlineKnowledge = await knowledgeBase.getAllContent(resolvedOrgId, kbDocumentIds);
+              } catch (err) {
+                log.error("❌ Failed to inline knowledge base for Vobiz call, falling back to live search:", err.message);
+              }
             }
             if (inlineKnowledge) {
               knowledgeBasePrompt = `
@@ -1365,6 +1375,8 @@ async function openGeminiSession(vobizWs, voiceName, systemPrompt, recordStream,
   // to delay this call's own 20ms pacer tick below, which is what callers
   // heard as mid-call stutter/voice breaks. Buffer.concat/subarray do the
   // same job as native memcpy/views instead of per-byte JS overhead.
+  let currentWs = vobizWs;
+  let currentRecordStream = recordStream;
   let outboundQueue = Buffer.alloc(0);
   let intervalId = null;
   // Throttled visibility into the buffering layer (chunk sizes in/out,
@@ -1391,9 +1403,10 @@ async function openGeminiSession(vobizWs, voiceName, systemPrompt, recordStream,
       }
       // 640 bytes of PCM16 represents 20ms of audio at 16kHz (320 samples * 2 bytes)
       if (outboundQueue.length >= 640) {
+        if (!currentWs || currentWs.readyState !== 1) return;
         const chunk = outboundQueue.subarray(0, 640);
         outboundQueue = outboundQueue.subarray(640);
-        sendJson(vobizWs, {
+        sendJson(currentWs, {
           event: "playAudio",
           media: {
             contentType: "audio/x-l16",
@@ -1519,19 +1532,21 @@ async function openGeminiSession(vobizWs, voiceName, systemPrompt, recordStream,
   // request initiated this specific WS session (it's a telephony
   // webhook), unlike the manual-dial/auto-dial paths that DO have one at
   // trigger time; usage still rolls up correctly by orgId regardless.
-  // Start usage tracking and resolve the tenant-scoped Vertex client in
-  // parallel. Neither operation depends on the other, so awaiting them
-  // sequentially only adds their latencies to the critical path before the
-  // Gemini Live socket can be opened.
-  const [usageHandle] = await Promise.all([
-    geminiUsageTracker.startUsageSession({
-      orgId,
-      callId,
-      sessionId: getStreamId ? getStreamId() : null,
-      provider: "vobiz",
-      model: modelName,
-    }),
-  ]);
+  // Usage tracking is not on the critical path to first audio — fire it
+  // in the background so the Gemini Live WebSocket connect (the real
+  // latency bottleneck, ~2s round-trip) can start immediately. The usage
+  // handle is only needed at session-close time to record final token
+  // counts, so we resolve it lazily via the promise.
+  const usageHandlePromise = geminiUsageTracker.startUsageSession({
+    orgId,
+    callId,
+    sessionId: getStreamId ? getStreamId() : null,
+    provider: "vobiz",
+    model: modelName,
+  }).catch((err) => {
+    log.error("❌ Gemini usage tracker start failed (non-fatal):", err.message);
+    return null;
+  });
 
   const geminiConnectStartedAt = Date.now();
   log.info(`⏱️ Vobiz Gemini connect starting (pre-warmed client=${Boolean(prewarmedDeps?.prewarmedGeminiClientPromise)})`);
@@ -1913,11 +1928,10 @@ async function openGeminiSession(vobizWs, voiceName, systemPrompt, recordStream,
               }
 
               // 2. Push to pacing queue and start playing at a constant rate.
-              // Keep a small bounded latency budget. If Gemini outruns the
-              // telephony leg for several seconds, retaining every old frame
-              // makes the caller hear stale speech long after the model has
-              // moved on. Prefer a fresh response over an ever-growing queue.
-              const MAX_OUTBOUND_QUEUE_BYTES = 32_000; // ~1s at 16kHz PCM16; keep barge-in latency bounded
+              // Allow plenty of headroom (~20s of audio) so natural AI turns
+              // are never truncated or chopped mid-sentence. Caller speech and
+              // barge-in events already clear outboundQueue immediately.
+              const MAX_OUTBOUND_QUEUE_BYTES = 640_000;
               outboundQueue = outboundQueue.length ? Buffer.concat([outboundQueue, pcm16k]) : pcm16k;
               if (outboundQueue.length > MAX_OUTBOUND_QUEUE_BYTES) {
                 outboundQueue = outboundQueue.subarray(outboundQueue.length - MAX_OUTBOUND_QUEUE_BYTES);
@@ -2031,12 +2045,12 @@ async function openGeminiSession(vobizWs, voiceName, systemPrompt, recordStream,
         // session ourselves at end of call) — only abnormal closes (e.g.
         // 1011 "Internal error occurred") should trigger a reconnect.
         if (e?.code === 1000) {
-          geminiUsageTracker.finalizeUsageSession(usageHandle, { status: "completed" }).catch(() => {});
+          usageHandlePromise.then((h) => h && geminiUsageTracker.finalizeUsageSession(h, { status: "completed" })).catch(() => {});
         } else {
-          geminiUsageTracker.failUsageSession(usageHandle, {
+          usageHandlePromise.then((h) => h && geminiUsageTracker.failUsageSession(h, {
             errorCode: e?.code != null ? String(e.code) : "unknown",
             errorMessage: e?.reason || "Gemini Live session closed abnormally",
-          }).catch(() => {});
+          })).catch(() => {});
         }
         if (e?.code !== 1000 && onDisconnect) onDisconnect(e?.code, e?.reason);
       },
@@ -2089,7 +2103,7 @@ async function openGeminiSession(vobizWs, voiceName, systemPrompt, recordStream,
               global.broadcastLog(`📥 [Gemini Receive] usageMetadata (promptTokens: ${inCount}, responseTokens: ${outCount})`, { type: "gemini_raw" });
             }
             onTokenUsage(inCount, outCount);
-            geminiUsageTracker.recordUsage(usageHandle, { inputTokens: inCount, outputTokens: outCount }).catch(() => {});
+            usageHandlePromise.then((h) => h && geminiUsageTracker.recordUsage(h, { inputTokens: inCount, outputTokens: outCount })).catch(() => {});
           }
         }
       } catch (err) {
@@ -2121,7 +2135,7 @@ async function openGeminiSession(vobizWs, voiceName, systemPrompt, recordStream,
       // mid-call system-triggered turn, which must NOT reuse this
       // "speak your opening greeting" framing.
       if (session.conn && session.conn.ws && session.conn.ws.readyState === 1) {
-        const directive = `[Call just connected — this is a system directive, not something the caller said. Speak your opening greeting now, in character, along these lines: "${text}"]`;
+        const directive = `[System directive — NOT something the caller said. The call just connected. Greet the caller IMMEDIATELY without any hesitation, pause, or thinking — speak right now, in character: "${text}"]`;
         session.conn.ws.send(JSON.stringify({
           client_content: {
             turns: [
