@@ -91,11 +91,34 @@ async function getModelForOrg(orgId = null) {
 // working unchanged. Not called on a genuinely failed request (network
 // error, bad credentials) since there's no usage to report; a fallback
 // value being returned isn't itself a cost.
+function extractJsonObject(content) {
+  if (content == null) return null;
+  const text = Array.isArray(content)
+    ? content.map((part) => typeof part === "string" ? part : (part?.text || "")).join("")
+    : String(content);
+  const cleaned = text.replace(/```(?:json)?\s*/gi, "").replace(/```/g, "").trim();
+  try { return JSON.parse(cleaned); } catch (_) {}
+  const first = cleaned.indexOf("{");
+  const last = cleaned.lastIndexOf("}");
+  if (first >= 0 && last > first) {
+    try { return JSON.parse(cleaned.slice(first, last + 1)); } catch (_) {}
+  }
+  return null;
+}
+
 async function generateStructured({ prompt, schema, fallback, label, onUsage, orgId = null }) {
   try {
-    const { raw, parsed } = await getModelForOrg(orgId)
-      .withStructuredOutput(schema, { includeRaw: true, name: label })
-      .invoke(prompt);
+    const model = await getModelForOrg(orgId);
+    // Some deployed LangChain versions expose ChatModel.invoke() but do not
+    // expose .withStructuredOutput(). Using the latter directly made every
+    // post-call agent fail in production. Keep structured output provider-
+    // independent: ask for strict JSON, invoke the normal chat model, then
+    // validate the result with the same Zod schema.
+    const result = await model.invoke(`${prompt}\n\nReturn ONLY one valid JSON object matching this schema. Do not use markdown or code fences. Schema:\n${JSON.stringify(schema?._def || {})}`);
+    const raw = result;
+    const parsedObject = extractJsonObject(result?.content);
+    if (!parsedObject) throw new Error("Model returned no valid JSON object");
+    const parsed = schema.parse(parsedObject);
     if (onUsage) {
       const usage = raw?.usage_metadata || {};
       onUsage({ inputTokens: usage.input_tokens || 0, outputTokens: usage.output_tokens || 0 });

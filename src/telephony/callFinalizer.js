@@ -274,7 +274,12 @@ async function finalizeCallRecord({
   // for its own save_enquiry safety net and passes the result through
   // here instead of paying for a second identical LLM call.
   if (!followUp && transcriptLines.length > 0) {
-    followUp = await postCallAgents.extractFollowUp(fullTranscript, orgId, callerNumber, accumulateUsage);
+    try {
+      followUp = await postCallAgents.extractFollowUp(fullTranscript, orgId, callerNumber, accumulateUsage);
+    } catch (err) {
+      log.error(`❌ [${provider}] follow-up extraction failed; continuing call finalization:`, err.message);
+      followUp = null;
+    }
   }
   followUp = followUp || { followUpPromised: false, callerName: null, querySummary: null, callbackRequested: false, callbackTime: null };
 
@@ -311,7 +316,12 @@ async function finalizeCallRecord({
   if (!callAnswers.length && transcriptLines.length > 0) {
     const questions = getWorkflowQuestions();
     if (questions?.length) {
-      callAnswers = await postCallAgents.extractWorkflowAnswers(fullTranscript, questions, orgId, accumulateUsage);
+      try {
+        callAnswers = await postCallAgents.extractWorkflowAnswers(fullTranscript, questions, orgId, accumulateUsage);
+      } catch (err) {
+        log.error(`❌ [${provider}] workflow answer extraction failed; continuing call finalization:`, err.message);
+        callAnswers = [];
+      }
       for (const { label, question, answer } of callAnswers) {
         if (!question) continue;
         // Entity name must be "leadresponses" (no underscore) — that's the
@@ -333,7 +343,12 @@ async function finalizeCallRecord({
   let aiSummary = fullTranscript.slice(0, 500);
   let postCallSummary = null;
   if (transcriptLines.length > 0) {
-    postCallSummary = await postCallAgents.generateCallSummary(fullTranscript, orgId, callAnswers, accumulateUsage, callerNumber);
+    try {
+      postCallSummary = await postCallAgents.generateCallSummary(fullTranscript, orgId, callAnswers, accumulateUsage, callerNumber);
+    } catch (err) {
+      log.error(`❌ [${provider}] post-call summary failed; continuing call finalization:`, err.message);
+      postCallSummary = null;
+    }
     if (postCallSummary) {
       aiSummary = postCallSummary.text;
 

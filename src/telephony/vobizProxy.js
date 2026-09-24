@@ -1812,7 +1812,7 @@ async function openGeminiSession(vobizWs, voiceName, systemPrompt, recordStream,
               // telephony leg for several seconds, retaining every old frame
               // makes the caller hear stale speech long after the model has
               // moved on. Prefer a fresh response over an ever-growing queue.
-              const MAX_OUTBOUND_QUEUE_BYTES = 96_000; // 3s at 16kHz PCM16
+              const MAX_OUTBOUND_QUEUE_BYTES = 32_000; // ~1s at 16kHz PCM16; keep barge-in latency bounded
               outboundQueue = outboundQueue.length ? Buffer.concat([outboundQueue, pcm16k]) : pcm16k;
               if (outboundQueue.length > MAX_OUTBOUND_QUEUE_BYTES) {
                 outboundQueue = outboundQueue.subarray(outboundQueue.length - MAX_OUTBOUND_QUEUE_BYTES);

@@ -418,7 +418,12 @@ async function forceHangupCurrentCall(task) {
     const { hangupVobizCall } = require("../telephony/vobizProxy");
     await hangupVobizCall(task.currentProviderCallSid, task.orgId);
   } catch (err) {
-    log.error(`❌ [autoDialEngine] Failed to force-hang-up call for task ${task.id} (org ${task.orgId}):`, err.message);
+    const message = String(err?.message || err || "");
+    if (/call.*not found|not found.*call|does not exist|already.*ended|already.*hang/i.test(message)) {
+      log.info(`ℹ️ [autoDialEngine] Call ${task.currentProviderCallSid} was already ended while stopping task ${task.id}; treating hangup as idempotent.`);
+      return;
+    }
+    log.error(`❌ [autoDialEngine] Failed to force-hang-up call for task ${task.id} (org ${task.orgId}):`, message);
   }
 }
 

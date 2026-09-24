@@ -14,7 +14,7 @@
 
 const { z } = require("zod");
 const { getEffectivePrompt } = require("../systemAgents");
-const { getModelForOrg, log, formatWorkflowAnswers } = require("./shared");
+const { generateStructured, log, formatWorkflowAnswers } = require("./shared");
 
 const SentimentSchema = z.object({
   sentiment: z.enum(["Positive", "Neutral", "Negative", "Unknown"]),
@@ -27,22 +27,17 @@ async function analyzeSentiment(transcript, orgId = null, workflowAnswers = []) 
     const prompt = template
       .replace("{workflowAnswers}", formatWorkflowAnswers(workflowAnswers))
       .replace("{transcript}", transcript);
-    // includeRaw: true so the underlying AIMessage (and its token usage)
-    // is still available — the caller (vobizProxy.js/geminiProxy.js) folds
-    // inputTokens/outputTokens below into the "gemini-postcall" cost-
-    // provider usage session alongside the other post-call agents (see
-    // callFinalizer.js's finalizeCallRecord). usage_metadata is
-    // LangChain's normalized token count across providers, already
-    // inclusive of Gemini's "thinking" tokens.
-    const { raw, parsed } = await getModelForOrg(orgId)
-      .withStructuredOutput(SentimentSchema, { includeRaw: true, name: "sentiment" })
-      .invoke(prompt);
-    const usage = raw?.usage_metadata || {};
-    return {
-      sentiment: parsed.sentiment,
-      inputTokens: usage.input_tokens || 0,
-      outputTokens: usage.output_tokens || 0,
-    };
+    let inputTokens = 0;
+    let outputTokens = 0;
+    const parsed = await generateStructured({
+      label: "sentiment",
+      orgId,
+      prompt,
+      schema: SentimentSchema,
+      fallback: { sentiment: "Unknown" },
+      onUsage: ({ inputTokens: i, outputTokens: o }) => { inputTokens = i; outputTokens = o; },
+    });
+    return { sentiment: parsed?.sentiment || "Unknown", inputTokens, outputTokens };
   } catch (err) {
     log.error("❌ [postCallAgents:sentiment] error:", err.message);
     return { sentiment: "Unknown", inputTokens: 0, outputTokens: 0 };
