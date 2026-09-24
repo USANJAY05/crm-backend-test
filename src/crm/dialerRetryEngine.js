@@ -50,11 +50,10 @@ async function processDueRetries() {
     log.error("❌ [dialerRetryEngine] Failed to recover stale retry claims:", err.message);
   }
 
+  // RabbitMQ can be temporarily unavailable exactly when a callback becomes due.
+  // Do not consume the one-shot BullMQ wake-up in that case. The durable queue
+  // adapter buffers publishes and flushes them after reconnect.
   const queue = getRedialQueue();
-  if (typeof queue.isReady === "function" && !queue.isReady()) {
-    log.warn("⏸️ [dialerRetryEngine] Durable queue is not ready; leaving callbacks pending for the next scheduler tick.");
-    return;
-  }
 
   let due = [];
   try {

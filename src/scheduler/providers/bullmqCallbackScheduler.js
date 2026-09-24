@@ -30,7 +30,9 @@ function redisConnection() {
 
 function callbackJobId(row) {
   const dueAt = new Date(row.nextRetryAt).getTime();
-  return `callback-${row.id}-${dueAt}`;
+  // Version the wake-up key so callbacks whose previous one-shot job was
+  // consumed during a transient queue outage can be scheduled again after a deploy.
+  return `callback-v2-${row.id}-${dueAt}`;
 }
 
 async function schedulePendingCallbacks(queue) {
