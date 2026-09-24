@@ -69,7 +69,7 @@ router.get("/me", requireAuth, async (req, res) => {
       db.findMembershipForUser(req.userId, req.userEmail),
       db.getOrg(req.orgId),
     ]);
-    const orgFlags = Array.isArray(org?.featureFlags) ? org.featureFlags : [];
+    const orgFlags = await require("../platform/featureFlags").sanitizeFeatureKeys(Array.isArray(org?.featureFlags) ? org.featureFlags : []);
     const memberFlags = Array.isArray(membership?.featureFlags) ? membership.featureFlags : [];
     // Org admins get whatever the org-level flags are (controlled by super admin).
     // Other roles get the intersection of personal grants and org-level grants.
@@ -97,6 +97,7 @@ router.get("/team", requireAuth, async (req, res) => {
 router.post("/team", requireAuth, requireRole(["Organization Admin"]), async (req, res) => {
   try {
     const { featureFlags, role, ...memberFields } = req.body || {};
+    const availableFeatureFlags = await require("../platform/featureFlags").sanitizeFeatureKeys(featureFlags);
 
     // Customer organization admins can create team members only. Platform-level
     // roles are never assignable from an organization-scoped endpoint.
@@ -110,7 +111,7 @@ router.post("/team", requireAuth, requireRole(["Organization Admin"]), async (re
     const m = await db.addOrgMember(req.orgId, null, {
       ...memberFields,
       role: "Team Member",
-      feature_flags: Array.isArray(featureFlags) ? featureFlags : [],
+      feature_flags: availableFeatureFlags,
     });
 
     if ((process.env.AUTH_PROVIDER || "cognito").toLowerCase() === "cognito") {
@@ -181,9 +182,10 @@ router.patch("/team/:id/flags", requireAuth, requireRole(["Organization Admin"])
   try {
     const { featureFlags } = req.body;
     if (!Array.isArray(featureFlags)) return res.status(400).json({ error: "featureFlags must be an array" });
-    const updated = await db.patch("team", req.orgId, req.params.id, { featureFlags });
+    const sanitizedFeatureFlags = await require("../platform/featureFlags").sanitizeFeatureKeys(featureFlags);
+    const updated = await db.patch("team", req.orgId, req.params.id, { featureFlags: sanitizedFeatureFlags });
     if (!updated) return res.status(404).json({ error: "Team member not found" });
-    auditLog.record(req.orgId, req, "team.flags_update", "team_member", req.params.id, { featureFlags });
+    auditLog.record(req.orgId, req, "team.flags_update", "team_member", req.params.id, { featureFlags: sanitizedFeatureFlags });
     res.json(updated);
   } catch (err) { res.status(500).json({ error: safeErrorMessage(err) }); }
 });

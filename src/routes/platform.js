@@ -205,6 +205,36 @@ router.put("/features/:key", async (req, res) => {
   }
 });
 
+router.get("/feature-groups", async (req, res) => {
+  try {
+    res.json(await platformAdmin.getFeatureGroups());
+  } catch (err) {
+    handleError(err, res);
+  }
+});
+
+router.put("/feature-groups", async (req, res) => {
+  try {
+    const actor = { userId: req.userId, userEmail: req.userEmail };
+    const groups = await platformAdmin.saveFeatureGroup(req.body || {});
+    await auditLog.record(null, actor, "platform.feature_group.update", "feature_group", req.body?.key || null, { group: req.body || {} });
+    res.json(groups);
+  } catch (err) {
+    handleError(err, res);
+  }
+});
+
+router.delete("/feature-groups/:key", async (req, res) => {
+  try {
+    const actor = { userId: req.userId, userEmail: req.userEmail };
+    const groups = await platformAdmin.deleteFeatureGroup(req.params.key);
+    await auditLog.record(null, actor, "platform.feature_group.delete", "feature_group", req.params.key, {});
+    res.json(groups);
+  } catch (err) {
+    handleError(err, res);
+  }
+});
+
 // POST /api/platform/organizations
 // Creates a new workspace (organization) and optionally seeds an initial admin member.
 router.post("/organizations", async (req, res) => {
@@ -277,7 +307,7 @@ router.post("/organizations", async (req, res) => {
       if (emailExists) return res.status(409).json({ error: `A member with email "${adminEmail}" already belongs to an organization.` });
     }
 
-    const orgFeatureFlags = Array.isArray(featureFlags) ? featureFlags : [];
+    const orgFeatureFlags = await platformAdmin.sanitizeFeatureKeys(Array.isArray(featureFlags) ? featureFlags : []);
     if (!["pay_as_you_go", "recharge_based"].includes(billingMethod)) {
       return res.status(400).json({ error: "Invalid billing method." });
     }
@@ -452,12 +482,13 @@ router.put("/organizations/:id/features", async (req, res) => {
     const { id } = req.params;
     const { featureFlags } = req.body || {};
     if (!Array.isArray(featureFlags)) return res.status(400).json({ error: "featureFlags must be an array of flag keys" });
+    const sanitizedFeatureFlags = await platformAdmin.sanitizeFeatureKeys(featureFlags);
     const org = await db.getOrg(id);
     if (!org) return res.status(404).json({ error: "Organization not found" });
     const supabase = require("../db/client");
-    await supabase.from("organizations").update({ feature_flags: featureFlags }).eq("id", id);
-    await auditLog.record(null, { userId: req.userId, userEmail: req.userEmail }, "platform.org.features.update", "organization", id, { featureFlags });
-    res.json({ success: true, featureFlags });
+    await supabase.from("organizations").update({ feature_flags: sanitizedFeatureFlags }).eq("id", id);
+    await auditLog.record(null, { userId: req.userId, userEmail: req.userEmail }, "platform.org.features.update", "organization", id, { featureFlags: sanitizedFeatureFlags });
+    res.json({ success: true, featureFlags: sanitizedFeatureFlags });
   } catch (err) {
     handleError(err, res);
   }
