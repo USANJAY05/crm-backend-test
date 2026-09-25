@@ -1699,21 +1699,6 @@ async function openGeminiSession(vobizWs, voiceName, systemPrompt, recordStream,
               parameters: { type: "OBJECT", properties: {} }
             }] : []),
             {
-              name: "save_enquiry",
-              description: "Save a caller's question or request that you genuinely could NOT answer or resolve yourself on this call, so a team member can follow up. Do NOT call this just because the caller said they're busy right now and asked you to call back later — that's a scheduled callback, handled automatically from what you say on the call, not a team follow-up, so leave it out of here. Call this quietly in the background as soon as you have any of the details — don't wait until the end of the call, and don't announce it as a database save.",
-              parameters: {
-                type: "OBJECT",
-                properties: {
-                  name: { type: "STRING", description: "Caller's name, if known" },
-                  phone: { type: "STRING", description: "Caller's phone number, if known" },
-                  email: { type: "STRING", description: "Caller's email, if known" },
-                  location: { type: "STRING", description: "Caller's location, if mentioned" },
-                  query_text: { type: "STRING", description: "What the caller asked or needs help with" }
-                },
-                required: ["query_text"]
-              }
-            },
-            {
               name: "save_contact_details",
               description: "Save/update this caller's name, email, or location in the contact directory the moment they tell you — quietly, in the background, don't announce it as a database save. Call it as soon as they give you their name (even before anything else is discussed), and again any time they give you an email or location you didn't already have.",
               parameters: {
@@ -2240,50 +2225,35 @@ async function processPostCallData({
 }) {
   callerNumber = normalizePhone(callerNumber);
 
-  let sentiment = "Neutral";
-  // callFinalizer.finalizeCallRecord() merges fragments and builds the full
-  // transcript itself further down — this local copy uses the same merge
-  // helper, needed here only because sentiment/follow-up run before that call.
-  const fullTranscript = callFinalizer.buildFullTranscript(callFinalizer.mergeTranscriptLines(transcriptLines));
+  let sentiment = null;
+  // Sentiment is computed once for Vobiz and passed into the shared finalizer.
+  // Busy/no-real-conversation calls intentionally remain null.
+  const mergedForSentiment = callFinalizer.mergeTranscriptLines(transcriptLines);
+  const callerWordCount = mergedForSentiment
+    .filter((line) => line.role === "user")
+    .reduce((sum, line) => sum + line.text.trim().split(/\s+/).filter(Boolean).length, 0);
+  const callAnswered = !isMachineDetected && callerWordCount > 0;
 
+  const fullTranscript = callFinalizer.buildFullTranscript(mergedForSentiment);
   let sentimentInputTokens = 0;
   let sentimentOutputTokens = 0;
 
-  // Sentiment analysis — pass along whatever workflow answers the AI's own
-  // live save_question_response tool already saved during the call (a
-  // cheap DB read, not another LLM call) so sentiment is judged against
-  // how much of the questionnaire the caller actually engaged with, not
-  // the transcript in isolation.
-  if (transcriptLines.length > 0) {
+  if (callAnswered) {
     let liveAnswers = [];
     try { liveAnswers = await db.getResponsesByCallId(orgId, callId); } catch {}
     const result = await postCallAgents.analyzeSentiment(fullTranscript, orgId, liveAnswers);
     sentiment = result.sentiment;
     sentimentInputTokens = result.inputTokens;
     sentimentOutputTokens = result.outputTokens;
-    log.info(`📊 Vobiz Sentiment: ${sentiment}`);
+    log.info(`📊 Vobiz Sentiment: ${sentiment ?? "null"}`);
   }
 
-  // Follow-up safety net — the AI has an explicit instruction to call
-  // save_enquiry the moment it promises a callback ("I'll forward this",
-  // "someone will contact you"), but live-audio function calling isn't
-  // reliable: confirmed live, a call where the AI said that exact line
-  // never invoked the tool, so nothing got saved and no error was ever
-  // logged (an uncalled tool leaves no trace to catch). Independently of
-  // whether the tool fired, re-check the finished transcript here and
-  // save the enquiry if one is missing — this doesn't depend on the
-  // live model's tool-calling behavior at all.
+  // Callback/enquiry extraction is intentionally NOT run here. The shared
+  // call finalizer runs the Scheduling & Enquiry Agent after the Summary
+  // Agent and with sentiment available, so there is exactly one action
+  // decision-maker and no duplicate callback/enquiry generation.
   let extractedCallerName = null;
   let followUp = null;
-  if (transcriptLines.length > 0 && orgId) {
-    followUp = await postCallAgents.extractFollowUp(fullTranscript, orgId, callerNumber, ({ inputTokens, outputTokens }) => {
-      sentimentInputTokens += inputTokens || 0;
-      sentimentOutputTokens += outputTokens || 0;
-    });
-    if (followUp.callerName) extractedCallerName = followUp.callerName;
-    // Enquiry persistence lives in callFinalizer.resolvePostCallOutcome so a
-    // busy/callback from either post-call agent cannot also create an enquiry.
-  }
 
   // Combined token calculation for BOTH models
   let totalInputTokens = liveInputTokens + sentimentInputTokens;
@@ -2348,11 +2318,8 @@ async function processPostCallData({
     attemptNumber,
     retryContext,
     providerCallSid,
-    followUp,
-    // Token usage from the sentiment + follow-up-safety-net calls already
-    // made above — callFinalizer folds these into the same
-    // "gemini-postcall" cost-tracking session as its own workflow-answers/
-    // summary calls, instead of this usage going untracked.
+    // Scheduling/enquiry extraction is owned by callFinalizer and runs once
+    // after summary, with the final sentiment available.
     sentimentInputTokens,
     sentimentOutputTokens,
   });

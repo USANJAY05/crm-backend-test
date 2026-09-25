@@ -29,46 +29,48 @@ const { getCallerTimezone } = require("../../lib/callerTimezone");
 const { nowInTimezone, zonedTimeToUtc } = require("../../lib/timezoneConvert");
 
 const FollowUpSchema = z.object({
-  followUpPromised: z.boolean().default(false),
-  callerName: z.string().nullable().default(null),
-  querySummary: z.string().nullable().default(null),
-  // Specifically true when the caller said something like "I'm busy right
-  // now" / "call me later" and a callback was agreed on for a LATER
-  // attempt — as opposed to followUpPromised alone, which also covers
-  // "someone from our team will follow up" (a human callback, not another
-  // AI redial). callFinalizer.js only schedules an automatic redial when
-  // this is true, never for a generic human-handoff promise.
   callbackRequested: z.boolean().default(false),
-  // Exactly one of these two should be set when callbackRequested is
-  // true (never both — the prompt tells the model to pick whichever
-  // actually matches what the caller said):
-  //
-  // A relative delay ("call me back in 30 minutes", "after an hour") —
-  // just the number of minutes from now. The model should NOT attempt to
-  // compute a resulting clock time itself; that happens in code below.
+  callbackTimeMentioned: z.boolean().default(false),
   callbackRelativeMinutes: z.number().nullable().default(null),
-  // A specific time and/or date ("5pm", "tomorrow morning", "next
-  // Monday at 10") resolved against the caller's own current local
-  // date/time (given in the prompt as {callerNow}) — a plain wall-clock
-  // string "YYYY-MM-DDTHH:mm:ss", NOT an ISO datetime with a "Z" or
-  // offset (there isn't one to know yet — this gets converted to a real
-  // UTC instant afterward using the caller's actual timezone).
   callbackLocalDateTime: z.string().nullable().default(null),
+  enquiryRequested: z.boolean().default(false),
+  enquirySummary: z.string().nullable().default(null),
+  callerName: z.string().nullable().default(null),
 });
 
-const DEFAULT_FOLLOW_UP = { followUpPromised: false, callerName: null, querySummary: null, callbackRequested: false, callbackTime: null };
+const DEFAULT_FOLLOW_UP = {
+  callbackRequested: false,
+  callbackTimeMentioned: false,
+  callbackTime: null,
+  enquiryRequested: false,
+  enquirySummary: null,
+  callerName: null,
+};
 
-async function extractFollowUp(transcript, orgId = null, callerPhone = null, onUsage) {
-  if (!transcript?.trim()) return { ...DEFAULT_FOLLOW_UP };
+async function extractFollowUp(
+  transcript,
+  orgId = null,
+  callerPhone = null,
+  onUsage,
+  { sentiment = null, summary = null, callAnswered = true } = {}
+) {
+  if (!transcript?.trim() || !callAnswered) return { ...DEFAULT_FOLLOW_UP };
 
   const timeZone = getCallerTimezone(callerPhone);
   const template = await getEffectivePrompt(orgId, "follow-up-safety-net");
+  // Older organization-specific prompt overrides may not contain the new
+  // placeholders. Always append the mandatory action policy and current
+  // context so legacy overrides cannot re-enable the old default callback
+  // or callback-vs-enquiry suppression behavior.
   const prompt = template
     .replace("{callerNow}", nowInTimezone(timeZone))
-    .replace("{transcript}", transcript);
+    .replace("{sentiment}", sentiment == null ? "null" : String(sentiment))
+    .replace("{summary}", summary || "(No summary available.)")
+    .replace("{transcript}", transcript)
+    + `\n\nMANDATORY SCHEDULING POLICY (overrides legacy wording):\n- Only schedule a callback when the caller explicitly wants a callback AND gives a usable time. Never invent a time and never default to two hours.\n- "later", "sometime", or "whenever" without a time means no callback.\n- No-answer, silence, wrong-number, and answering-machine calls never create conversational callbacks or enquiries.\n- Enquiry means only a meaningful caller question/request that the live agent genuinely could not answer or resolve. If the agent answered it, no enquiry.\n- A valid callback and a valid unresolved enquiry may both exist on the same answered call.\n- Sentiment ${sentiment == null ? "null" : sentiment} is context only; do not turn busy into Negative.\n\nCURRENT CALLER LOCAL TIME: ${nowInTimezone(timeZone)}\nCURRENT SENTIMENT: ${sentiment == null ? "null" : sentiment}\nCURRENT SUMMARY: ${summary || "(none)"}`;
 
   const result = await generateStructured({
-    label: "follow-up",
+    label: "scheduling-enquiry",
     orgId,
     prompt,
     schema: FollowUpSchema,
@@ -77,30 +79,29 @@ async function extractFollowUp(transcript, orgId = null, callerPhone = null, onU
   });
   if (!result) return { ...DEFAULT_FOLLOW_UP };
 
-  // Deterministic resolution — see the module comment above for why
-  // neither of these is trusted from the model directly.
+  // Application-level guard: an automatic callback is valid only when the
+  // caller explicitly supplied a usable time. The model is never allowed
+  // to turn "call me later" into the old default two-hour callback.
   let callbackTime = null;
-  if (result.callbackRequested) {
+  let callbackRequested = !!result.callbackRequested && !!result.callbackTimeMentioned;
+
+  if (callbackRequested) {
     if (typeof result.callbackRelativeMinutes === "number" && result.callbackRelativeMinutes > 0) {
       callbackTime = new Date(Date.now() + result.callbackRelativeMinutes * 60000).toISOString();
     } else if (result.callbackLocalDateTime) {
       const resolved = zonedTimeToUtc(result.callbackLocalDateTime, timeZone);
-      // A resolved time already in the past (the model misread "5pm" as
-      // today's 5pm when the call itself happened after 5pm, say) isn't
-      // useful — leave callbackTime null so callFinalizer.js falls back
-      // to its own default delay instead of scheduling a redial for a
-      // moment that's already gone.
       if (resolved && resolved.getTime() > Date.now()) callbackTime = resolved.toISOString();
     }
+    if (!callbackTime) callbackRequested = false;
   }
 
   return {
-    followUpPromised: result.followUpPromised,
-    callerName: result.callerName,
-    querySummary: result.querySummary,
-    callbackRequested: result.callbackRequested,
+    callbackRequested,
+    callbackTimeMentioned: !!result.callbackTimeMentioned,
     callbackTime,
+    enquiryRequested: !!result.enquiryRequested,
+    enquirySummary: result.enquirySummary || null,
+    callerName: result.callerName || null,
   };
 }
-
 module.exports = { extractFollowUp };

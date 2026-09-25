@@ -40,24 +40,27 @@ function usableCallbackTime(iso) {
   return parsed.toISOString();
 }
 
-const DEFAULT_CALLBACK_DELAY_MS = 2 * 60 * 60 * 1000;
-
-// One decision for busy-callback vs human enquiry. Either post-call agent
-// requesting a callback wins; enquiry is only saved when neither does.
-function resolvePostCallOutcome({ followUp, postCallSummary, isMachineDetected, attemptNumber = 1, retryContext }) {
-  const fu = followUp || {};
-  const summary = postCallSummary || null;
-  const isCallbackDesired = !!(!isMachineDetected && (fu.callbackRequested || summary?.callbackRequested));
+// One validated post-call decision controls callback and enquiry actions.
+function resolvePostCallOutcome({
+  scheduling,
+  isMachineDetected,
+  attemptNumber = 1,
+  retryContext,
+}) {
+  const decision = scheduling || {};
   const maxAttempts = db.MAX_RETRY_ATTEMPTS || 3;
-  const isCallbackExhausted = isCallbackDesired && attemptNumber >= maxAttempts;
-  const callbackRequested = isCallbackDesired && !isCallbackExhausted;
-  const enquiryRequested = (!isCallbackDesired || isCallbackExhausted) && !!(fu.followUpPromised || summary?.enquiryRequested || (isCallbackExhausted && (fu.querySummary || summary?.querySummary)));
-  const callbackTimeToStore = usableCallbackTime(fu.callbackTime) || usableCallbackTime(summary?.callbackTime);
-  const callbackReasonToStore = fu.querySummary || summary?.querySummary || null;
-  const enquirySummary = summary?.querySummary || fu.querySummary || (isCallbackExhausted ? "Maximum callback attempts reached; customer was previously busy" : null);
-  const callerName = summary?.callerName || fu.callerName || null;
+  const requestedCallback = !!decision.callbackRequested && !!decision.callbackTime;
+  const callbackExhausted = requestedCallback && attemptNumber >= maxAttempts;
+  const callbackRequested = requestedCallback && !callbackExhausted;
+
+  // Enquiries are independent from callbacks. A caller can legitimately be
+  // busy AND ask an unresolved question during the same call, so callback
+  // must no longer suppress a genuine enquiry.
+  const enquiryRequested = !isMachineDetected && !!decision.enquiryRequested && !!decision.enquirySummary;
+
   let finalStatus = "Completed";
   let retryFieldsToSave = {};
+
   if (isMachineDetected) {
     finalStatus = "Answering Machine";
     retryFieldsToSave = { ...db.computeRetryFields(attemptNumber), retryContext };
@@ -66,10 +69,10 @@ function resolvePostCallOutcome({ followUp, postCallSummary, isMachineDetected, 
     retryFieldsToSave = {
       attemptNumber,
       retryStatus: "pending",
-      nextRetryAt: callbackTimeToStore || new Date(Date.now() + DEFAULT_CALLBACK_DELAY_MS).toISOString(),
+      nextRetryAt: decision.callbackTime,
       retryContext,
     };
-  } else if (isCallbackExhausted) {
+  } else if (callbackExhausted) {
     finalStatus = "Completed";
     retryFieldsToSave = {
       attemptNumber,
@@ -78,9 +81,16 @@ function resolvePostCallOutcome({ followUp, postCallSummary, isMachineDetected, 
       retryContext,
     };
   }
+
   return {
-    finalStatus, callbackRequested, enquiryRequested, callbackTimeToStore,
-    callbackReasonToStore, enquirySummary, callerName, retryFieldsToSave,
+    finalStatus,
+    callbackRequested,
+    enquiryRequested,
+    callbackTimeToStore: callbackRequested ? usableCallbackTime(decision.callbackTime) : null,
+    callbackReasonToStore: callbackRequested ? "Caller requested a callback at a specific time." : null,
+    enquirySummary: enquiryRequested ? decision.enquirySummary : null,
+    callerName: decision.callerName || null,
+    retryFieldsToSave,
   };
 }
 
@@ -265,7 +275,7 @@ async function finalizeCallRecord({
   // voice session's own usage row (provider "gemini") since these are a
   // different, far cheaper model (gemini-2.5-flash-lite) and should show
   // as their own cost line, not blended into voice-session cost.
-  let postCallInputTokens = sentimentInputTokens;
+  // Legacy providers may still pass "Unknown". Persist the new canonical null\n  // value so busy/callback calls are never treated as negative/neutral.\n  sentiment = sentiment === "Unknown" ? null : sentiment;\n\n  let postCallInputTokens = sentimentInputTokens;
   let postCallOutputTokens = sentimentOutputTokens;
   const accumulateUsage = ({ inputTokens, outputTokens }) => {
     postCallInputTokens += inputTokens || 0;
@@ -282,24 +292,16 @@ async function finalizeCallRecord({
     timestamp: new Date().toTimeString().split(" ")[0],
   }));
 
-  // Picked up but never actually engaged — cut the call quickly, said
-  // nothing, or gave one throwaway word ("wrong number", "no") before
-  // hanging up. This is a real, separate outcome from `status`: such a
-  // call still ends up "Completed" (someone did pick up, it wasn't a
-  // machine, they never asked for a callback) but no real conversation
-  // happened, which every downstream sentiment/summary/conversion number
-  // was silently treating the same as an actual answered call. Counting
-  // the caller's OWN words (not the AI's) across the whole transcript is
-  // a simple, explainable proxy for "did they actually talk" — no extra
-  // LLM call needed, and it's monotonic with duration/effort, not just a
-  // duration cutoff (a caller can talk plenty in a short call, or say
-  // nothing at all in a long one where the AI just kept talking).
+  // Any finalized caller speech means the call was answered for purposes
+  // of conversational post-processing. A zero-word caller transcript is
+  // kept out of the conversational callback/enquiry pipeline so no-answer
+  // and machine outcomes remain separate.
   const callerWordCount = mergedTranscriptLines
     .filter(l => l.role === "user")
     .reduce((sum, l) => sum + l.text.trim().split(/\s+/).filter(Boolean).length, 0);
-  const callAnswered = !isMachineDetected && callerWordCount >= 4;
+  const callAnswered = !isMachineDetected && callerWordCount > 0;
 
-  const { leadId, resolvedLeadName } = await matchContact(orgId, callId, callerNumber, direction, extractedCallerName);
+  let { leadId, resolvedLeadName } = await matchContact(orgId, callId, callerNumber, direction, extractedCallerName);
 
   // Advance contact/campaign -> lead the moment a call to this contact is
   // actually answered and engaged with — the second automatic half of the
@@ -316,30 +318,9 @@ async function finalizeCallRecord({
     }).catch(() => {});
   }
 
-  // "The caller said they're busy and asked to be called back" — status
-  // stays out of "Completed" (which the dialer task queue reads as "this
-  // lead is done") and instead becomes "Callback Scheduled" with a
-  // best-effort time, driving an automatic redial through the SAME
-  // retry-field mechanism already used for "No Answer"/"Answering
-  // Machine" (see db.computeRetryFields, services/dialerRetryEngine.js).
-  // Only ever computed once per call — vobizProxy.js already runs this
-  // for its own save_enquiry safety net and passes the result through
-  // here instead of paying for a second identical LLM call.
-  if (!followUp && transcriptLines.length > 0) {
-    try {
-      followUp = await postCallAgents.extractFollowUp(fullTranscript, orgId, callerNumber, accumulateUsage);
-    } catch (err) {
-      log.error(`❌ [${provider}] follow-up extraction failed; continuing call finalization:`, err.message);
-      followUp = null;
-    }
-  }
-  followUp = followUp || { followUpPromised: false, callerName: null, querySummary: null, callbackRequested: false, callbackTime: null };
-
-  // Prefer answers already saved live during the call (real-time tool calls);
-  // only fall back to post-hoc transcript extraction if none were saved.
-  // Computed BEFORE the summary/sentiment below (moved ahead of both) so
-  // they can judge/describe the call using what was actually captured,
-  // not the transcript alone.
+  // Post-call action decisions happen AFTER the descriptive summary so the
+  // Scheduling & Enquiry Agent can see both summary and sentiment. Only that
+  // agent is allowed to decide callback/enquiry actions.
   let callAnswers = [];
   try { callAnswers = await db.getResponsesByCallId(orgId, callId); } catch {}
   if (!callAnswers.length && transcriptLines.length > 0) {
@@ -353,14 +334,6 @@ async function finalizeCallRecord({
       }
       for (const { label, question, answer } of callAnswers) {
         if (!question) continue;
-        // Entity name must be "leadresponses" (no underscore) — that's the
-        // key registered in db/repository.js's ENTITIES map (table name
-        // "lead_responses" with the underscore); the previous "lead_responses"
-        // entity name here threw "unknown entity" on every call, silently
-        // swallowed by this same .catch(), so this fallback write path had
-        // never actually persisted anything. Field keys are the entity's
-        // camelCase API names (see ENTITIES.leadresponses.fields) — org_id
-        // is added automatically by db.create().
         db.create("leadresponses", orgId, {
           callId, question, answer, label: label || question,
           createdAt: new Date().toISOString(),
@@ -373,21 +346,68 @@ async function finalizeCallRecord({
   let postCallSummary = null;
   if (transcriptLines.length > 0) {
     try {
-      postCallSummary = await postCallAgents.generateCallSummary(fullTranscript, orgId, callAnswers, accumulateUsage, callerNumber);
+      postCallSummary = await postCallAgents.generateCallSummary(
+        fullTranscript,
+        orgId,
+        callAnswers,
+        accumulateUsage,
+        callerNumber
+      );
     } catch (err) {
       log.error(`❌ [${provider}] post-call summary failed; continuing call finalization:`, err.message);
       postCallSummary = null;
     }
-    if (postCallSummary) {
-      aiSummary = postCallSummary.text;
+    if (postCallSummary) aiSummary = postCallSummary.text;
+  }
+
+  // The scheduling/enquiry agent is deliberately skipped for answering
+  // machines and calls where the caller never genuinely engaged. This keeps
+  // "No Answer"/machine retries separate from conversational callbacks.
+  let scheduling = null;
+  if (!isMachineDetected && callAnswered && transcriptLines.length > 0) {
+    const existingScheduling = followUp && Object.prototype.hasOwnProperty.call(followUp, "callbackTimeMentioned")
+      ? followUp
+      : null;
+
+    if (existingScheduling) {
+      scheduling = existingScheduling;
+    } else {
+      try {
+        scheduling = await postCallAgents.extractFollowUp(
+          fullTranscript,
+          orgId,
+          callerNumber,
+          accumulateUsage,
+          {
+            sentiment,
+            summary: postCallSummary?.summary || aiSummary,
+            callAnswered,
+          }
+        );
+      } catch (err) {
+        log.error(`❌ [${provider}] scheduling/enquiry extraction failed; continuing call finalization:`, err.message);
+        scheduling = null;
+      }
     }
   }
+
+  scheduling = scheduling || {
+    callbackRequested: false,
+    callbackTimeMentioned: false,
+    callbackTime: null,
+    enquiryRequested: false,
+    enquirySummary: null,
+    callerName: null,
+  };
 
   const {
     finalStatus, enquiryRequested, callbackTimeToStore, callbackReasonToStore,
     enquirySummary, retryFieldsToSave, callerName: outcomeCallerName,
   } = resolvePostCallOutcome({
-    followUp, postCallSummary, isMachineDetected, attemptNumber, retryContext,
+    scheduling,
+    isMachineDetected,
+    attemptNumber,
+    retryContext,
   });
 
   if (enquiryRequested && enquirySummary) {
@@ -408,6 +428,60 @@ async function finalizeCallRecord({
         } catch (err) {
           log.error(`❌ [${provider}] Post-call enquiry save failed:`, err.message);
         }
+  }
+
+  // A genuinely positive, fully successful conversation becomes a Lead.
+  // This is intentionally evaluated only after the post-call Scheduling &
+  // Enquiry Agent has finished: a busy callback or unresolved enquiry is not
+  // treated as a fully-qualified lead yet.
+  const positiveLeadCandidate =
+    sentiment === "Positive" &&
+    callAnswered &&
+    !enquiryRequested &&
+    !callbackTimeToStore;
+
+  if (positiveLeadCandidate) {
+    try {
+      if (leadId) {
+        const current = await db.getLeadById(orgId, leadId).catch(() => null);
+        if (current && (!current.pipelineStage ||
+          current.pipelineStage === "contact" ||
+          current.pipelineStage === "campaign" ||
+          current.pipelineStage === "lead")) {
+          const updated = await db.patch("leads", orgId, leadId, {
+            pipelineStage: "lead",
+            status: current.status || "New",
+          });
+          resolvedLeadName = updated?.name || resolvedLeadName;
+          log.info(`🎯 [${provider}] Positive call promoted existing contact ${leadId} to Leads`);
+        }
+      } else if (callerNumber) {
+        // Positive calls from a brand-new number should also appear in the
+        // Leads section. Use the phone as the dedupe key before creating.
+        const existing = await db.findLeadByPhone(orgId, callerNumber);
+        if (existing) {
+          leadId = existing.id;
+          resolvedLeadName = existing.name || resolvedLeadName;
+          await db.patch("leads", orgId, leadId, { pipelineStage: "lead" }).catch(() => {});
+        } else {
+          const created = await db.create("leads", orgId, {
+            name: outcomeCallerName || extractedCallerName || resolvedLeadName || "Unknown Caller",
+            phone: callerNumber,
+            source: "voice_ai",
+            status: "New",
+            pipelineStage: "lead",
+            createdAt: new Date().toISOString(),
+            updatedAt: new Date().toISOString(),
+          });
+          leadId = created.id;
+          resolvedLeadName = created.name || resolvedLeadName;
+          log.info(`🎯 [${provider}] Positive call created new Lead ${leadId} for ${callerNumber}`);
+        }
+      }
+    } catch (err) {
+      // Lead promotion must never make an otherwise completed call fail.
+      log.error(`❌ [${provider}] Positive-call lead promotion failed:`, err.message);
+    }
   }
 
   // This used to be fire-and-forget (db.create(...).then().catch(), never

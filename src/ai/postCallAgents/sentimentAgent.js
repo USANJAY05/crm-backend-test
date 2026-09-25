@@ -1,27 +1,19 @@
 // src/ai/postCallAgents/sentimentAgent.js
 // ============================================================
-// Post-call sentiment classification — Positive/Neutral/Negative/Unknown.
-//
-// "Unknown" covers the "not enough of a real conversation to judge" case
-// (the caller was busy and asked for a callback) — using the schema's
-// existing Unknown value rather than a literal null, since sentiment is a
-// typed enum ('Positive' | 'Neutral' | 'Negative' | 'Unknown') across the
-// DB column, CallLog/Lead types, Reports' sentiment breakdown, and the
-// sentiment chip components — introducing null would need every one of
-// those to add null-handling for no real benefit over the sentinel value
-// they already all support.
-// ============================================================
-
+// Post-call sentiment classification — Positive/Neutral/Negative/null.
+// null is intentional for busy/callback-only calls or calls with insufficient
+// genuine caller interaction. The database sentiment field is nullable text,
+// so no sentinel such as "Unknown" is required.
 const { z } = require("zod");
 const { getEffectivePrompt } = require("../systemAgents");
 const { generateStructured, log, formatWorkflowAnswers } = require("./shared");
 
 const SentimentSchema = z.object({
-  sentiment: z.enum(["Positive", "Neutral", "Negative", "Unknown"]),
+  sentiment: z.union([z.enum(["Positive", "Neutral", "Negative"]), z.null()]),
 });
 
 async function analyzeSentiment(transcript, orgId = null, workflowAnswers = []) {
-  if (!transcript?.trim()) return { sentiment: "Unknown", inputTokens: 0, outputTokens: 0 };
+  if (!transcript?.trim()) return { sentiment: null, inputTokens: 0, outputTokens: 0 };
   try {
     const template = await getEffectivePrompt(orgId, "sentiment-analyzer");
     const prompt = template
@@ -34,13 +26,13 @@ async function analyzeSentiment(transcript, orgId = null, workflowAnswers = []) 
       orgId,
       prompt,
       schema: SentimentSchema,
-      fallback: { sentiment: "Unknown" },
+      fallback: { sentiment: null },
       onUsage: ({ inputTokens: i, outputTokens: o }) => { inputTokens = i; outputTokens = o; },
     });
-    return { sentiment: parsed?.sentiment || "Unknown", inputTokens, outputTokens };
+    return { sentiment: parsed?.sentiment ?? null, inputTokens, outputTokens };
   } catch (err) {
     log.error("❌ [postCallAgents:sentiment] error:", err.message);
-    return { sentiment: "Unknown", inputTokens: 0, outputTokens: 0 };
+    return { sentiment: null, inputTokens: 0, outputTokens: 0 };
   }
 }
 
