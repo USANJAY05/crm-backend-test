@@ -948,7 +948,7 @@ function computeRetryFields(attemptNumber, policy = DEFAULT_RETRY_POLICY, caller
 async function getRetryStatusForOrg(orgId) {
   const { data, error } = await supabase
     .from("call_logs")
-    .select("lead_name, caller_number, status, attempt_number, next_retry_at, retry_status")
+    .select("lead_name, caller_number, status, attempt_number, next_retry_at, retry_status, retry_context")
     .eq("org_id", orgId)
     .in("retry_status", ["pending", "retrying", "retried", "exhausted"])
     .order("created_at", { ascending: false });
@@ -964,7 +964,8 @@ async function getRetryStatusForOrg(orgId) {
     status: row.status,
     attemptNumber: row.attempt_number,
     nextRetryAt: row.next_retry_at,
-    retryStatus: row.retry_status
+    retryStatus: row.retry_status,
+    retryConfig: row.retry_context?.retryPolicy || DEFAULT_RETRY_POLICY,
   }));
 }
 
