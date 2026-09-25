@@ -1161,7 +1161,30 @@ async function findOrgIdForNumber(number) {
 // means "won't collide with call routing").
 async function isNumberAvailable(number, orgId) {
   const existingOrgId = await findOrgIdForNumber(number);
-  return !existingOrgId || existingOrgId === orgId;
+  if (existingOrgId && existingOrgId !== orgId) return false;
+
+  // Vobiz channel rows are globally unique by type + external_id. A number
+  // can therefore remain reserved even after its virtual_numbers row was
+  // removed (for example, after an older/stale disconnect). Check channels
+  // too so we never pass the availability check and then hit a DB duplicate
+  // key during channelsEngine.upsertChannel().
+  if (number) {
+    const digitsOnly = String(number).replace(/[^\\d]/g, "");
+    if (digitsOnly) {
+      const { data: channels, error } = await supabase
+        .from("channels")
+        .select("org_id, external_id")
+        .eq("type", "vobiz");
+      if (error) throw new Error("[db.isNumberAvailable] " + error.message);
+      const last10 = digitsOnly.slice(-10);
+      const channelMatch = (channels || []).find(
+        (row) => String(row.external_id || "").replace(/[^\\d]/g, "").endsWith(last10)
+      );
+      if (channelMatch && channelMatch.org_id !== orgId) return false;
+    }
+  }
+
+  return true;
 }
 
 // Finds a lending-org lead whose phone matches (last-10-digits, same
