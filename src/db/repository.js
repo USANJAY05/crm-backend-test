@@ -860,12 +860,85 @@ async function signInWithPassword(email, password) {
 // vobizProxy.js's processPostCallData for machine-detected ones) and by
 // services/dialerRetryEngine.js, which schedules the next actual redial.
 const MAX_RETRY_ATTEMPTS = 3;
-const RETRY_DELAY_MS = 30 * 60 * 1000; // 30 minutes
-function computeRetryFields(attemptNumber) {
-  if (attemptNumber >= MAX_RETRY_ATTEMPTS) {
+const DEFAULT_RETRY_POLICY = Object.freeze({
+  enabled: true,
+  strategy: "exponential",
+  intervalMinutes: 120,
+  maxRetries: 3,
+  quietHoursStart: "21:00",
+  quietHoursEnd: "08:00",
+});
+
+function normalizeRetryPolicy(policy = {}) {
+  const strategy = policy.strategy === "fixed" ? "fixed" : "exponential";
+  const intervalMinutes = Math.max(15, Math.min(24 * 60, Number(policy.intervalMinutes) || DEFAULT_RETRY_POLICY.intervalMinutes));
+  const maxRetries = Math.max(0, Math.min(10, Number.isFinite(Number(policy.maxRetries)) ? Number(policy.maxRetries) : DEFAULT_RETRY_POLICY.maxRetries));
+  return {
+    ...DEFAULT_RETRY_POLICY,
+    ...policy,
+    enabled: policy.enabled !== false,
+    strategy,
+    intervalMinutes,
+    maxRetries,
+    quietHoursStart: /^([01]\\d|2[0-3]):[0-5]\\d$/.test(String(policy.quietHoursStart || "")) ? policy.quietHoursStart : DEFAULT_RETRY_POLICY.quietHoursStart,
+    quietHoursEnd: /^([01]\\d|2[0-3]):[0-5]\\d$/.test(String(policy.quietHoursEnd || "")) ? policy.quietHoursEnd : DEFAULT_RETRY_POLICY.quietHoursEnd,
+  };
+}
+
+function localDateTimeParts(date, timeZone) {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone,
+    year: "numeric", month: "2-digit", day: "2-digit",
+    hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false,
+  }).formatToParts(date);
+  const get = (type) => parts.find((p) => p.type === type)?.value;
+  return { date: `${get("year")}-${get("month")}-${get("day")}`, hour: Number(get("hour")), minute: Number(get("minute")), second: Number(get("second")) };
+}
+
+function addLocalDays(dateStr, days) {
+  const d = new Date(`${dateStr}T12:00:00Z`);
+  d.setUTCDate(d.getUTCDate() + days);
+  return d.toISOString().slice(0, 10);
+}
+
+function nextRetryTime({ attemptNumber, policy, callerPhone }) {
+  const p = normalizeRetryPolicy(policy);
+  if (!p.enabled || p.maxRetries <= 0 || attemptNumber > p.maxRetries) return null;
+
+  const multiplier = p.strategy === "fixed" ? 1 : Math.pow(2, Math.max(0, attemptNumber - 1));
+  const delayMinutes = Math.min(7 * 24 * 60, p.intervalMinutes * multiplier);
+  let target = new Date(Date.now() + delayMinutes * 60 * 1000);
+
+  try {
+    const { getCallerTimezone } = require("../lib/callerTimezone");
+    const { zonedTimeToUtc } = require("../lib/timezoneConvert");
+    const timeZone = getCallerTimezone(callerPhone);
+    const local = localDateTimeParts(target, timeZone);
+    const [startH, startM] = p.quietHoursStart.split(":").map(Number);
+    const [endH, endM] = p.quietHoursEnd.split(":").map(Number);
+    const minutes = local.hour * 60 + local.minute;
+    const start = startH * 60 + startM;
+    const end = endH * 60 + endM;
+    const inQuiet = start > end ? minutes >= start || minutes < end : minutes >= start && minutes < end;
+    if (inQuiet) {
+      const targetDate = minutes >= start && start > end ? addLocalDays(local.date, 1) : local.date;
+      target = zonedTimeToUtc(`${targetDate}T${String(endH).padStart(2, "0")}:${String(endM).padStart(2, "0")}:00`, timeZone) || target;
+    }
+  } catch (_) {}
+  return target.toISOString();
+}
+
+function computeRetryFields(attemptNumber, policy = DEFAULT_RETRY_POLICY, callerPhone = null) {
+  const p = normalizeRetryPolicy(policy);
+  if (!p.enabled || attemptNumber > p.maxRetries) {
     return { attemptNumber, retryStatus: "exhausted", nextRetryAt: null, retryClaimedAt: null };
   }
-  return { attemptNumber, retryStatus: "pending", nextRetryAt: new Date(Date.now() + RETRY_DELAY_MS).toISOString(), retryClaimedAt: null };
+  return {
+    attemptNumber,
+    retryStatus: "pending",
+    nextRetryAt: nextRetryTime({ attemptNumber, policy: p, callerPhone }),
+    retryClaimedAt: null,
+  };
 }
 
 // Org-scoped view of which phone numbers currently have an auto-redial in
@@ -1849,6 +1922,8 @@ module.exports = {
   deleteOrganizationData,
   listCostArchive,
   computeRetryFields,
+  normalizeRetryPolicy,
+  DEFAULT_RETRY_POLICY,
   MAX_RETRY_ATTEMPTS,
   addOrgMember,
   updateOrgMemberUserId,
