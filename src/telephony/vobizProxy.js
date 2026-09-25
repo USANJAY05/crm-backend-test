@@ -474,7 +474,7 @@ async function resolveVobizCallSetup(resolvedOrgId, calleeNumber, resolvedPhone,
   return { customObjects, orgHasKnowledgeBase, kbMode, kbDocumentIds, companyInfoPrompt, knowledgeBaseSearchEnabled, questionsList, orgName: resolvedOrgName, callerContactName: knownContactName, activeConfig: resolvedConfig, voiceName: resolvedVoiceName, inlineKnowledge };
 }
 
-async function triggerVobizOutboundCall(orgId, phoneNumber, { questions, from, language, assignedContact, baseUrl, attemptNumber = 1, starhealthEnabled = false, agentId, taskId = null, leadId = null } = {}) {
+async function triggerVobizOutboundCall(orgId, phoneNumber, { questions, from, language, assignedContact, baseUrl, attemptNumber = 1, starhealthEnabled = false, agentId, taskId = null, leadId = null, retryPolicy = null } = {}) {
   const channelsEngine = require("../channels/engine");
   const billingEngine = require("../crm/billingEngine");
   const rechargeBilling = require("../crm/rechargeBilling");
@@ -620,7 +620,7 @@ async function triggerVobizOutboundCall(orgId, phoneNumber, { questions, from, l
       orgId,
       direction: "outbound",
       attemptNumber,
-      retryContext: { questions, from, language, assignedContact, taskId, leadId, provider: "vobiz", billingReservationId: billingReservation?.id || null },
+      retryContext: { questions, from, language, assignedContact, taskId, leadId, provider: "vobiz", retryPolicy: retryPolicy || null, billingReservationId: billingReservation?.id || null },
       fromNumber: sanitizedFrom,
       toNumber: sanitizedTo,
     }
