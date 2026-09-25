@@ -123,21 +123,6 @@ const BASE_TOOL_DECLARATIONS = [
       required: ["whatsapp_number", "message"]
     }
   },
-  {
-    name: "save_enquiry",
-    description: "Save a caller's question or request that you couldn't fully resolve on this call, so a team member can follow up. Call this quietly in the background as soon as you have any of the details — don't wait until the end of the call, and don't announce it as a database save.",
-    parameters: {
-      type: "OBJECT",
-      properties: {
-        name: { type: "STRING", description: "Caller's name, if known" },
-        phone: { type: "STRING", description: "Caller's phone number, if known" },
-        email: { type: "STRING", description: "Caller's email, if known" },
-        location: { type: "STRING", description: "Caller's location, if mentioned" },
-        query_text: { type: "STRING", description: "What the caller asked or needs help with" }
-      },
-      required: ["query_text"]
-    }
-  },
 ];
 
 async function handleVobizSession(vobizWs, streamContext = null) {
