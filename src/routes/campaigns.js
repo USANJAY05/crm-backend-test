@@ -168,6 +168,25 @@ router.post("/dialer-tasks", requireAuth, async (req, res) => {
   try {
     const body = { ...(req.body || {}) };
     body.retryConfig = db.normalizeRetryPolicy(body.retryConfig || db.DEFAULT_RETRY_POLICY);
+
+    // A workflow is a reusable definition, while each dialer task is one
+    // concrete execution of that workflow. Store immutable run metadata so
+    // two campaigns created from the same workflow can always be
+    // distinguished without changing the workflow name.
+    if (body.workflowId && !body.workflowRunMetadata) {
+      const workflows = await db.list("workflows", req.orgId);
+      const workflow = workflows.find((w) => w.id === body.workflowId);
+      const runAt = body.createdAt || new Date().toISOString();
+      body.workflowRunMetadata = {
+        workflowId: body.workflowId,
+        workflowName: workflow?.name || body.workflowName || null,
+        runAt,
+        runDate: runAt.slice(0, 10),
+        runTime: runAt.slice(11, 19),
+        timezone: "UTC"
+      };
+    }
+
     const created = await db.create("dialertasks", req.orgId, body);
     res.status(201).json({ ...created, retryConfig: body.retryConfig });
   } catch (err) { res.status(500).json({ error: safeErrorMessage(err) }); }
