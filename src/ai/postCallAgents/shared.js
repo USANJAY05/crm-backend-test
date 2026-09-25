@@ -25,6 +25,7 @@ const { getLogger } = require("../../observability/logger");
 const log = getLogger("ai.postCallAgents");
 
 const MODEL = "gemini-2.5-flash-lite";
+const POST_CALL_PIPELINE_VERSION = "2026-09-25.11";
 
 // Both LangChain client classes throw in their CONSTRUCTOR when no
 // credentials are configured (unlike @google/genai's client, which only
@@ -138,7 +139,16 @@ async function generateStructured({ prompt, schema, fallback, label, onUsage, or
         usage.candidatesTokenCount ??
         0
       ) || 0;
-      onUsage({ inputTokens, outputTokens });
+      // Usage metering is observational. A billing callback must never be
+      // allowed to turn a successful AI generation into a failed agent.
+      try {
+        onUsage({ inputTokens, outputTokens });
+      } catch (usageErr) {
+        log.error(
+          `⚠️ [postCallAgents:${label}] usage accounting callback failed; preserving AI result:`,
+          usageErr.message
+        );
+      }
     }
     return parsed;
   } catch (err) {
@@ -158,4 +168,4 @@ function formatWorkflowAnswers(workflowAnswers) {
   return rows.map((r) => `- ${r.label || r.question}: ${r.answer?.trim() || "(no answer given)"}`).join("\n");
 }
 
-module.exports = { MODEL, getModel, getModelForOrg, log, generateStructured, formatWorkflowAnswers };
+module.exports = { MODEL, POST_CALL_PIPELINE_VERSION, getModel, getModelForOrg, log, generateStructured, formatWorkflowAnswers };
