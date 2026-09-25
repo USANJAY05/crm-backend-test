@@ -15,6 +15,7 @@ const crypto = require("crypto");
 const db = require("../db/repository");
 const costProviders = require("../platform/costProviders");
 const channelsEngine = require("../channels/engine");
+const callBalancePolicy = require("../platform/callBalancePolicy");
 
 const RESERVATION_MINUTES = Math.max(1, Number(process.env.RECHARGE_CALL_RESERVATION_MINUTES || 1));
 
@@ -52,21 +53,38 @@ async function estimateReservation(orgId, providerKey) {
   const scope = normalizeChargeScope(org.chargeScope);
   if (method !== "recharge_based") return { allowed: true, org, billingMethod: method, chargeScope: scope, amount: 0 };
 
+  const policy = await callBalancePolicy.getOrganizationPolicy(orgId).catch(() => ({
+    effective: { minimumBalanceInr: 0, reservationMinutes: RESERVATION_MINUTES },
+  }));
+  const reservationMinutes = Math.max(1, Number(policy.effective?.reservationMinutes) || RESERVATION_MINUTES);
+  const minimumBalanceInr = money(policy.effective?.minimumBalanceInr);
+
   const [ai, call, selfManaged] = await Promise.all([
-    costProviders.computeAiCost({ providerKey: "gemini", totalTokens: 0, durationSeconds: RESERVATION_MINUTES * 60 }).catch(() => null),
-    scope === "ai_and_call_provider" ? costProviders.computeCallCost({ providerKey, seconds: RESERVATION_MINUTES * 60 }).catch(() => null) : null,
+    costProviders.computeAiCost({ providerKey: "gemini", totalTokens: 0, durationSeconds: reservationMinutes * 60 }).catch(() => null),
+    scope === "ai_and_call_provider" ? costProviders.computeCallCost({ providerKey, seconds: reservationMinutes * 60 }).catch(() => null) : null,
     scope === "ai_and_call_provider" ? isSelfManagedProvider(orgId, providerKey) : false,
   ]);
 
   let amount = 0;
   if (ai) amount += Number(ai.totalCost) || 0;
   if (scope === "ai_and_call_provider" && !selfManaged && call) amount += Number(call.totalCost) || 0;
-  amount = money(amount);
+  // The configured industry/org minimum is a wallet safety floor. The actual
+  // reservation can be higher when provider/AI pricing for the configured
+  // reservation window is higher.
+  amount = Math.max(money(amount), minimumBalanceInr);
 
-  // If AI pricing is not configured yet, don't block a recharge org just
-  // because the platform has not set an AI rate. A non-zero provider rate
-  // still protects the wallet when call-provider charging is enabled.
-  return { allowed: true, org, billingMethod: method, chargeScope: scope, amount, selfManaged };
+  // If pricing is not configured, the explicit minimum still protects the
+  // wallet. If both are zero, preserve the existing non-blocking behavior.
+  return {
+    allowed: true,
+    org,
+    billingMethod: method,
+    chargeScope: scope,
+    amount,
+    selfManaged,
+    reservationMinutes,
+    minimumBalanceInr,
+  };
 }
 
 async function authorizeOutboundCall(orgId, { providerKey = "vobiz" } = {}) {
