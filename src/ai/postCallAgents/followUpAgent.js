@@ -96,9 +96,15 @@ async function extractFollowUp(
     if (!callbackTime) callbackRequested = false;
   }
 
+  const busyOnly = /busy|not a good time|cannot talk|can't talk/i.test(transcript);
+  if (busyOnly && !callbackTime) {
+    callbackRequested = false;
+    callbackTime = null;
+  }
+
   return {
     callbackRequested,
-    callbackTimeMentioned: !!result.callbackTimeMentioned,
+    callbackTimeMentioned: callbackRequested && !!result.callbackTimeMentioned,
     callbackTime,
     enquiryRequested: !!result.enquiryRequested,
     enquirySummary: result.enquirySummary || null,
