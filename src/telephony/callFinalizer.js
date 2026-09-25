@@ -387,6 +387,10 @@ async function finalizeCallRecord({
     log.warn(`⚠️ [${provider}] workflow response lookup failed; continuing without saved answers:`, err.message);
   }
 
+  log.info(
+    `🔧 [${provider}] Post-call inputs: transcriptLines=${transcriptLines?.length || 0}, normalizedTranscriptLines=${mergedTranscriptLines.length}, workflowQuestions=${workflowQuestions?.length || 0}, callerWordCount=${callerWordCount}`
+  );
+
   const workflowPromise = (workflowQuestions?.length && transcriptLines.length > 0)
     ? (async () => {
         const startedAt = Date.now();
@@ -436,7 +440,7 @@ async function finalizeCallRecord({
           log.error(`❌ [${provider}] workflow answer extraction failed; continuing call finalization:`, err.message);
         }
       })()
-    : Promise.resolve();
+    : (log.info(`⏭️ [${provider}] Workflow agent skipped: no workflow questions assigned to this call.`), Promise.resolve());
 
   const summaryPromise = transcriptLines.length > 0
     ? (async () => {
@@ -847,6 +851,10 @@ async function finalizeCallRecord({
   // than a parallel one-off cost calculation. Fire-and-forget, same as
   // the metering calls above: usage tracking must never fail call
   // finalization.
+  log.info(
+    `📊 [${provider}] Post-call usage total: inputTokens=${postCallUsage.inputTokens}, outputTokens=${postCallUsage.outputTokens}`
+  );
+
   if (postCallUsage.inputTokens > 0 || postCallUsage.outputTokens > 0) {
     geminiUsageTracker.startUsageSession({
       orgId, callId, provider: "post-call-agents", model: postCallAgents.MODEL, costProviderKey: "gemini-postcall",
