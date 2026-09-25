@@ -120,8 +120,25 @@ async function generateStructured({ prompt, schema, fallback, label, onUsage, or
     if (!parsedObject) throw new Error("Model returned no valid JSON object");
     const parsed = schema.parse(parsedObject);
     if (onUsage) {
-      const usage = raw?.usage_metadata || {};
-      onUsage({ inputTokens: usage.input_tokens || 0, outputTokens: usage.output_tokens || 0 });
+      // LangChain normally exposes usage_metadata, but provider adapters can
+      // surface camelCase fields or response_metadata. Normalize all supported
+      // shapes here so agents never need provider-specific token logic.
+      const usage = raw?.usage_metadata || raw?.response_metadata?.usage || {};
+      const inputTokens = Number(
+        usage.input_tokens ??
+        usage.inputTokens ??
+        usage.prompt_token_count ??
+        usage.promptTokenCount ??
+        0
+      ) || 0;
+      const outputTokens = Number(
+        usage.output_tokens ??
+        usage.outputTokens ??
+        usage.candidates_token_count ??
+        usage.candidatesTokenCount ??
+        0
+      ) || 0;
+      onUsage({ inputTokens, outputTokens });
     }
     return parsed;
   } catch (err) {
