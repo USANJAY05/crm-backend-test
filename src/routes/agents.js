@@ -8,7 +8,7 @@ const knowledgeBase = require("../ai/knowledgeBase");
 const { getLogger } = require("../observability/logger");
 const { parsePagination } = require("../lib/pagination");
 const { buildFinalPrompt, CALL_TYPES } = require("../config/promptTemplates");
-const { getVoicePrompt } = require("../platform/prompts");
+const { getVoicePrompt, getPromptCatalog, getLanguagePrompt, getDialectPrompt } = require("../platform/prompts");
 const { DIALECT_PROFILES, getSupportedLanguages, getDialectsForLanguage } = require("../config/dialectProfiles");
 const log = getLogger("routes.agents");
 
@@ -73,8 +73,7 @@ router.post("/", requireAuth, requireRole(ADMIN_ROLES), async (req, res) => {
 // and valid call types. Frontend must not hardcode this list separately.
 router.get("/prompt-config", requireAuth, async (req, res) => {
   res.json({
-    languages: getSupportedLanguages(),
-    dialectsByLanguage: DIALECT_PROFILES,
+    ...await getPromptCatalog(),
     callTypes: CALL_TYPES,
   });
 });
@@ -90,7 +89,15 @@ router.post("/generate-prompt", requireAuth, async (req, res) => {
     if (!callType || !CALL_TYPES.includes(String(callType).toUpperCase())) {
       return res.status(400).json({ error: `callType is required and must be one of ${CALL_TYPES.join(", ")}` });
     }
-    if (language && dialect && !getDialectsForLanguage(language).includes(dialect)) {
+    const catalog = await getPromptCatalog();
+    const configuredLanguage = catalog.languages.find((x) => x.language === language);
+    if (language && !configuredLanguage) {
+      return res.status(400).json({ error: `"${language}" is not a configured language` });
+    }
+    const configuredDialect = language && dialect
+      ? (catalog.dialectsByLanguage[language] || []).find((x) => x.dialect === dialect)
+      : null;
+    if (language && dialect && !configuredDialect) {
       return res.status(400).json({ error: `"${dialect}" is not a configured dialect for language "${language}"` });
     }
     let resolvedCompanyName = companyName;
@@ -101,7 +108,12 @@ router.post("/generate-prompt", requireAuth, async (req, res) => {
     const voicePrompt = await getVoicePrompt(callType);
     const prompt = buildFinalPrompt({
       agentName, companyName: resolvedCompanyName, industry, language, dialect, businessContext, callType,
-    }, voicePrompt.prompt);
+    }, voicePrompt.prompt, {
+      languagePrompt: configuredLanguage?.prompt,
+      dialect: configuredDialect || null,
+      dialectPrompt: configuredDialect?.prompt,
+      dialectExamples: configuredDialect?.examples,
+    });
     res.json({ prompt });
   } catch (err) {
     log.error("[agents] generate-prompt error:", err.message);
