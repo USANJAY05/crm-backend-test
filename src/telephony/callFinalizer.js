@@ -21,7 +21,7 @@
 const db = require("../db/repository");
 const objectsEngine = require("../crm/objectsEngine");
 const postCallAgents = require("../ai/postCallAgents");
-const { normalizeQuestions, validateWorkflowAnswers } = require("../ai/postCallAgents/workflowAnswersAgent");
+const { validateWorkflowAnswers } = require("../ai/postCallAgents/workflowAnswersAgent");
 const storage = require("../storage");
 const geminiUsageTracker = require("../ai/geminiUsageTracker");
 const { getLogger } = require("../observability/logger");
@@ -356,75 +356,140 @@ async function finalizeCallRecord({
   // callback, and enquiry decisions. Answering a call alone is not enough
   // to move a contact into Leads.
 
-  // Post-call action decisions happen AFTER the descriptive summary so the
-  // Scheduling & Enquiry Agent can see both summary and sentiment. Only that
-  // agent is allowed to decide callback/enquiry actions.
+  // Post-call agents are independent. Run them concurrently so one slow
+  // generation never serializes the entire pipeline. Each agent has its own
+  // fallback and failure boundary; deterministic validation below is the only
+  // authority for actions.
   let callAnswers = [];
-  let workflowQuestions = null;
+  let workflowQuestions = getWorkflowQuestions();
   let workflowValidation = { complete: true, missingQuestions: [], requiredQuestions: [] };
-  try { callAnswers = await db.getResponsesByCallId(orgId, callId); } catch {}
-  workflowQuestions = getWorkflowQuestions();
 
-  // Always run transcript extraction when a workflow is assigned. Live
-  // function-calling may have saved only SOME answers; extracting only when
-  // callAnswers is empty would permanently leave the remaining mandatory
-  // questions missing and make the strict lead gate unreliable.
-  if (workflowQuestions?.length && transcriptLines.length > 0) {
-    let extractedAnswers = [];
-    try {
-      extractedAnswers = await postCallAgents.extractWorkflowAnswers(
-        fullTranscript,
-        workflowQuestions,
-        orgId,
-        accumulateUsage
-      );
-    } catch (err) {
-      log.error(`❌ [${provider}] workflow answer extraction failed; continuing call finalization:`, err.message);
-      extractedAnswers = [];
-    }
-
-    const existingByQuestion = new Map(
-      (callAnswers || [])
-        .filter((row) => row?.question)
-        .map((row) => [String(row.question).trim().toLowerCase(), row])
-    );
-
-    // Live-saved answers are authoritative. Transcript extraction only fills
-    // questions that were not already captured by live tool-calling.
-    for (const answerRow of extractedAnswers) {
-      if (!answerRow?.question) continue;
-      const key = String(answerRow.question).trim().toLowerCase();
-      const existing = existingByQuestion.get(key);
-      const existingAnswer = existing?.answer == null ? "" : String(existing.answer).trim();
-
-      if (!existing || !existingAnswer) {
-        if (!existing) {
-          callAnswers.push(answerRow);
-        } else {
-          existing.answer = answerRow.answer || "";
-          existing.label = existing.label || answerRow.label || answerRow.question;
-        }
-
-        if (answerRow.answer != null && String(answerRow.answer).trim()) {
-          db.create("leadresponses", orgId, {
-            callId,
-            question: answerRow.question,
-            answer: answerRow.answer,
-            label: answerRow.label || answerRow.question,
-            createdAt: new Date().toISOString(),
-          }).catch(() => {});
-        }
-      }
-    }
+  try { callAnswers = await db.getResponsesByCallId(orgId, callId); } catch (err) {
+    log.warn(`⚠️ [${provider}] workflow response lookup failed; continuing without saved answers:`, err.message);
   }
 
-  // Strict workflow gate: every question is mandatory unless the workflow
-  // explicitly marks it optional (or required=false). This runs after both
-  // saved live-tool answers and post-call transcript extraction, so lead
-  // creation can never bypass the rule.
-  if (!workflowQuestions) {
-    workflowQuestions = getWorkflowQuestions();
+  const workflowPromise = (workflowQuestions?.length && transcriptLines.length > 0)
+    ? (async () => {
+        const startedAt = Date.now();
+        try {
+          const extractedAnswers = await postCallAgents.extractWorkflowAnswers(
+            fullTranscript,
+            workflowQuestions,
+            orgId,
+            accumulateUsage
+          );
+
+          const existingByQuestion = new Map(
+            (callAnswers || [])
+              .filter((row) => row?.question)
+              .map((row) => [String(row.question).trim().toLowerCase(), row])
+          );
+
+          // Live-saved answers are authoritative. Transcript extraction only
+          // fills questions that are absent or blank.
+          for (const answerRow of extractedAnswers || []) {
+            if (!answerRow?.question) continue;
+            const key = String(answerRow.question).trim().toLowerCase();
+            const existing = existingByQuestion.get(key);
+            const existingAnswer = existing?.answer == null ? "" : String(existing.answer).trim();
+
+            if (!existing || !existingAnswer) {
+              if (!existing) {
+                callAnswers.push(answerRow);
+              } else {
+                existing.answer = answerRow.answer || "";
+                existing.label = existing.label || answerRow.label || answerRow.question;
+              }
+
+              if (answerRow.answer != null && String(answerRow.answer).trim()) {
+                db.create("leadresponses", orgId, {
+                  callId,
+                  question: answerRow.question,
+                  answer: answerRow.answer,
+                  label: answerRow.label || answerRow.question,
+                  createdAt: new Date().toISOString(),
+                }).catch((err) => log.warn(`⚠️ [${provider}] workflow answer persistence failed:`, err.message));
+              }
+            }
+          }
+          log.info(`🧠 [${provider}] Workflow agent completed in ${Date.now() - startedAt}ms; answers=${extractedAnswers?.length || 0}`);
+        } catch (err) {
+          log.error(`❌ [${provider}] workflow answer extraction failed; continuing call finalization:`, err.message);
+        }
+      })()
+    : Promise.resolve();
+
+  const summaryPromise = transcriptLines.length > 0
+    ? (async () => {
+        const startedAt = Date.now();
+        try {
+          // Summary is descriptive only. It does not need workflow answers and
+          // must not become a dependency for callback/enquiry decisions.
+          const result = await postCallAgents.generateCallSummary(
+            fullTranscript,
+            orgId,
+            [],
+            accumulateUsage,
+            callerNumber
+          );
+          log.info(`📝 [${provider}] Summary agent completed in ${Date.now() - startedAt}ms`);
+          return result;
+        } catch (err) {
+          log.error(`❌ [${provider}] post-call summary failed; continuing call finalization:`, err.message);
+          return null;
+        }
+      })()
+    : Promise.resolve(null);
+
+  const existingScheduling = followUp && Object.prototype.hasOwnProperty.call(followUp, "callbackTimeMentioned")
+    ? followUp
+    : null;
+
+  const schedulingPromise = (!isMachineDetected && callAnswered && transcriptLines.length > 0 && !existingScheduling)
+    ? (async () => {
+        const startedAt = Date.now();
+        try {
+          // Scheduling is transcript-first. Summary/sentiment are deliberately
+          // not required inputs so this agent can run in parallel and cannot
+          // inherit a model-generated decision from another agent.
+          const result = await postCallAgents.extractFollowUp(
+            fullTranscript,
+            orgId,
+            callerNumber,
+            accumulateUsage,
+            {
+              sentiment,
+              summary: "(Independent transcript-first decision; do not infer actions from summary.)",
+              callAnswered,
+            }
+          );
+          log.info(`📅 [${provider}] Scheduling agent completed in ${Date.now() - startedAt}ms`);
+          return result;
+        } catch (err) {
+          log.error(`❌ [${provider}] scheduling/enquiry extraction failed; continuing call finalization:`, err.message);
+          return null;
+        }
+      })()
+    : Promise.resolve(existingScheduling);
+
+  const [workflowResult, postCallSummary, schedulingResult] = await Promise.allSettled([
+    workflowPromise,
+    summaryPromise,
+    schedulingPromise,
+  ]);
+
+  // Never let one post-call agent failure abort call persistence.
+  if (workflowResult.status === "rejected") {
+    log.error(`❌ [${provider}] workflow agent promise rejected:`, workflowResult.reason?.message || workflowResult.reason);
   }
+  if (postCallSummary && postCallSummary.status === "rejected") {
+    log.error(`❌ [${provider}] summary agent promise rejected:`, postCallSummary.reason?.message || postCallSummary.reason);
+  }
+  if (schedulingResult.status === "rejected") {
+    log.error(`❌ [${provider}] scheduling agent promise rejected:`, schedulingResult.reason?.message || schedulingResult.reason);
+  }
+
+  // Workflow validation runs only after extraction has settled.
   if (workflowQuestions?.length) {
     workflowValidation = validateWorkflowAnswers(workflowQuestions, callAnswers);
     if (!workflowValidation.complete) {
@@ -435,52 +500,13 @@ async function finalizeCallRecord({
   }
 
   let aiSummary = fullTranscript.slice(0, 500);
-  let postCallSummary = null;
-  if (transcriptLines.length > 0) {
-    try {
-      postCallSummary = await postCallAgents.generateCallSummary(
-        fullTranscript,
-        orgId,
-        callAnswers,
-        accumulateUsage,
-        callerNumber
-      );
-    } catch (err) {
-      log.error(`❌ [${provider}] post-call summary failed; continuing call finalization:`, err.message);
-      postCallSummary = null;
-    }
-    if (postCallSummary) aiSummary = postCallSummary.text;
+  if (postCallSummary.status === "fulfilled" && postCallSummary.value) {
+    aiSummary = postCallSummary.value.text;
   }
 
-  // The scheduling/enquiry agent is deliberately skipped for answering
-  // machines and calls where the caller never genuinely engaged. This keeps
-  // "No Answer"/machine retries separate from conversational callbacks.
   let scheduling = null;
   if (!isMachineDetected && callAnswered && transcriptLines.length > 0) {
-    const existingScheduling = followUp && Object.prototype.hasOwnProperty.call(followUp, "callbackTimeMentioned")
-      ? followUp
-      : null;
-
-    if (existingScheduling) {
-      scheduling = existingScheduling;
-    } else {
-      try {
-        scheduling = await postCallAgents.extractFollowUp(
-          fullTranscript,
-          orgId,
-          callerNumber,
-          accumulateUsage,
-          {
-            sentiment,
-            summary: postCallSummary?.summary || aiSummary,
-            callAnswered,
-          }
-        );
-      } catch (err) {
-        log.error(`❌ [${provider}] scheduling/enquiry extraction failed; continuing call finalization:`, err.message);
-        scheduling = null;
-      }
-    }
+    scheduling = schedulingResult.status === "fulfilled" ? schedulingResult.value : null;
   }
 
   scheduling = scheduling || {
