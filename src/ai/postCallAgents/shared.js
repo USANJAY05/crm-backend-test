@@ -25,7 +25,7 @@ const { getLogger } = require("../../observability/logger");
 const log = getLogger("ai.postCallAgents");
 
 const MODEL = "gemini-2.5-flash-lite";
-const POST_CALL_PIPELINE_VERSION = "2026-09-25.11";
+const POST_CALL_PIPELINE_VERSION = "2026-09-25.12";
 
 // Both LangChain client classes throw in their CONSTRUCTOR when no
 // credentials are configured (unlike @google/genai's client, which only
@@ -108,7 +108,10 @@ function extractJsonObject(content) {
 }
 
 async function generateStructured({ prompt, schema, fallback, label, onUsage, orgId = null }) {
+  const startedAt = Date.now();
+  const promptChars = String(prompt || "").length;
   try {
+    log.info("🧠 [postCallAgents:" + label + "] generation started: promptChars=" + promptChars);
     const model = await getModelForOrg(orgId);
     // Some deployed LangChain versions expose ChatModel.invoke() but do not
     // expose .withStructuredOutput(). Using the latter directly made every
@@ -120,6 +123,7 @@ async function generateStructured({ prompt, schema, fallback, label, onUsage, or
     const parsedObject = extractJsonObject(result?.content);
     if (!parsedObject) throw new Error("Model returned no valid JSON object");
     const parsed = schema.parse(parsedObject);
+    log.info("✅ [postCallAgents:" + label + "] generation completed in " + (Date.now() - startedAt) + "ms");
     if (onUsage) {
       // LangChain normally exposes usage_metadata, but provider adapters can
       // surface camelCase fields or response_metadata. Normalize all supported
@@ -152,7 +156,7 @@ async function generateStructured({ prompt, schema, fallback, label, onUsage, or
     }
     return parsed;
   } catch (err) {
-    log.error(`❌ [postCallAgents:${label}] structured generation failed: ${err.message}`);
+    log.error("❌ [postCallAgents:" + label + "] structured generation failed after " + (Date.now() - startedAt) + "ms (promptChars=" + promptChars + "): " + err.message);
     return typeof fallback === "function" ? fallback(err) : fallback;
   }
 }
