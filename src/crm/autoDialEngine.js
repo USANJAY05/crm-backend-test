@@ -149,8 +149,41 @@ function nextPendingLeadId(task) {
 
 // One task, one tick. Never throws — every branch either advances the
 // task's own state or leaves it untouched for the next tick to retry.
+function isInsufficientRechargeBalanceError(err) {
+  const code = String(err?.code || "").toUpperCase();
+  const message = String(err?.message || err || "").toLowerCase();
+  return (
+    code === "INSUFFICIENT_RECHARGE_BALANCE" ||
+    err?.isRechargeBillingError === true ||
+    Number(err?.statusCode) === 402 ||
+    /insufficient recharge balance|recharge balance is empty/.test(message)
+  );
+}
+
 async function processTask(task) {
   const { orgId, id: taskId } = task;
+
+  // A wallet block is terminal for this auto-dial run. Repair stale task
+  // snapshots as well as newly written state so a scheduler tick cannot
+  // immediately claim the same lead again after an insufficient-balance
+  // failure.
+  if (task.autoDialBlockedReason === "insufficient_balance") {
+    if (task.autoDialEnabled || task.autoDialStatus !== "paused" || task.currentLeadId || task.currentProviderCallSid) {
+      await db.patch("dialertasks", orgId, taskId, {
+        currentLeadId: null,
+        currentProviderCallSid: null,
+        currentCallStartedAt: null,
+        autoDialEnabled: false,
+        autoDialStatus: "paused",
+        autoDialBlockedReason: "insufficient_balance",
+        nextDialAt: null,
+        autoDialRunId: null,
+      }).catch((patchErr) => {
+        log.error(`❌ [autoDialEngine] Failed to persist insufficient-balance pause for task ${taskId} (org ${orgId}):`, patchErr.message);
+      });
+    }
+    return;
+  }
 
   // ── A call is already in flight for this task — check if it finished ──
   if (task.currentProviderCallSid) {
@@ -421,17 +454,30 @@ async function handlePlaceDialJob(data) {
   } catch (err) {
     log.error(`❌ [autoDialEngine] Failed to dial lead ${leadId} for task ${taskId} (org ${orgId}):`, err.message);
 
-    if (err.statusCode === 403 || err.statusCode === 402) {
-      // Compliance blocks and recharge/billing blocks apply to the whole
-      // task. Pause immediately so the scheduler cannot retry the same
-      // lead every few seconds, and broadcast the exact reason to the UI.
-      await db.patch("dialertasks", orgId, taskId, {
-        currentLeadId: null,
-        currentCallStartedAt: null,
-        autoDialEnabled: false,
-        autoDialStatus: "paused",
-        ...(err.statusCode === 402 ? { autoDialBlockedReason: "insufficient_balance" } : {}),
-      }).catch(() => {});
+    const insufficientBalance = isInsufficientRechargeBalanceError(err);
+    const complianceBlocked = Number(err?.statusCode) === 403;
+
+    if (complianceBlocked || insufficientBalance) {
+      // Compliance and wallet blocks apply to the whole task. Wallet errors
+      // are identified by a stable code/message as well as statusCode because
+      // connector/error wrappers may preserve only part of the original Error.
+      const reason = insufficientBalance ? "insufficient_balance" : "compliance_blocked";
+      const severity = insufficientBalance ? "warning" : "error";
+
+      try {
+        await db.patch("dialertasks", orgId, taskId, {
+          currentLeadId: null,
+          currentProviderCallSid: null,
+          currentCallStartedAt: null,
+          autoDialEnabled: false,
+          autoDialStatus: "paused",
+          ...(insufficientBalance ? { autoDialBlockedReason: reason } : {}),
+          nextDialAt: null,
+          autoDialRunId: null,
+        });
+      } catch (patchErr) {
+        log.error(`❌ [autoDialEngine] Failed to pause blocked task ${taskId} (org ${orgId}):`, patchErr.message);
+      }
 
       if (global.broadcastLog) {
         global.broadcastLog(`🤖 Auto-dial task "${taskName}" paused — ${err.message}`, {
@@ -439,8 +485,8 @@ async function handlePlaceDialJob(data) {
           orgId,
           taskId,
           status: "paused",
-          reason: err.statusCode === 402 ? "insufficient_balance" : "compliance_blocked",
-          severity: err.statusCode === 402 ? "warning" : "error",
+          reason,
+          severity,
           message: err.message,
         });
       }
