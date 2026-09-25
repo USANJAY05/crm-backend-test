@@ -20,7 +20,11 @@ const authProvider = require("../auth");
 const { requireAuthIdentityOnly, requirePlatformAdmin } = require("../middleware/auth");
 const { getLogger } = require("../observability/logger");
 const { validateExistingProject } = require("../gcp/existingProjectValidator");
-const { getAllVoicePrompts, setVoicePrompt, getAllSystemPrompts, setGlobalSystemPrompt } = require("../platform/prompts");
+const {
+  getAllVoicePrompts, setVoicePrompt, getAllSystemPrompts, setGlobalSystemPrompt,
+  getPromptCatalog, addPromptLanguage, updatePromptLanguage, removePromptLanguage,
+  addPromptDialect, updatePromptDialect, removePromptDialect,
+} = require("../platform/prompts");
 const log = getLogger("routes.platform");
 
 const router = express.Router();
@@ -44,6 +48,45 @@ router.get("/prompts", async (req, res) => {
   } catch (err) {
     handleError(err, res);
   }
+});
+
+router.get("/prompts/languages-dialects", async (req, res) => {
+  try { res.json(await getPromptCatalog()); }
+  catch (err) { handleError(err, res); }
+});
+
+router.post("/prompts/languages", async (req, res) => {
+  try {
+    const catalog = await addPromptLanguage(req.body || {});
+    await auditLog.record(null, { userId: req.userId, userEmail: req.userEmail },
+      "platform.prompt.language.create", "prompt_language", req.body?.language || null, {});
+    res.status(201).json(catalog);
+  } catch (err) { handleError(err, res); }
+});
+
+router.put("/prompts/languages/:language", async (req, res) => {
+  try { res.json(await updatePromptLanguage(req.params.language, req.body || {})); }
+  catch (err) { handleError(err, res); }
+});
+
+router.delete("/prompts/languages/:language", async (req, res) => {
+  try { res.json(await removePromptLanguage(req.params.language)); }
+  catch (err) { handleError(err, res); }
+});
+
+router.post("/prompts/languages/:language/dialects", async (req, res) => {
+  try { res.status(201).json(await addPromptDialect(req.params.language, req.body || {})); }
+  catch (err) { handleError(err, res); }
+});
+
+router.put("/prompts/languages/:language/dialects/:dialect", async (req, res) => {
+  try { res.json(await updatePromptDialect(req.params.language, req.params.dialect, req.body || {})); }
+  catch (err) { handleError(err, res); }
+});
+
+router.delete("/prompts/languages/:language/dialects/:dialect", async (req, res) => {
+  try { res.json(await removePromptDialect(req.params.language, req.params.dialect)); }
+  catch (err) { handleError(err, res); }
 });
 
 router.put("/prompts/voice/:callType", async (req, res) => {
