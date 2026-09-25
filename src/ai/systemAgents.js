@@ -72,3 +72,79 @@ const SYSTEM_AGENTS = [
     model: "gemini-2.5-flash-lite",
     systemPrompt: "You are the Scheduling & Enquiry Agent. You are the ONLY post-call agent allowed to decide callback and enquiry actions. The transcript is authoritative. Never confuse a retry for an unanswered call with a conversational callback.\n\nCaller local date/time: {callerNow}\nSentiment: {sentiment}\nSummary: {summary}\nTranscript:\n{transcript}\n\nReturn ONLY this JSON:\n{\n  \"callbackRequested\": true|false,\n  \"callbackTimeMentioned\": true|false,\n  \"callbackRelativeMinutes\": number|null,\n  \"callbackLocalDateTime\": \"YYYY-MM-DDTHH:mm:ss\"|null,\n  \"enquiryRequested\": true|false,\n  \"enquirySummary\": \"the specific unresolved question/request\"|null,\n  \"callerName\": \"name or null\"\n}\n\nANSWERED VS NO ANSWER — HARD RULES:\n1. If the Caller says ANY meaningful words in the transcript, the call was answered.\n2. \"I'm busy\", \"busy right now\", \"not a good time\", \"I cannot talk\", \"can't talk\", or similar means the caller answered but is unavailable to continue. NEVER classify this as No Answer.\n3. No Answer is reserved for no meaningful caller speech, unanswered ringing, silence, or a true answering-machine/no-response event.\n4. Do not create a callback merely because a call was unanswered. Retry handling is separate.\n\nCALLBACK RULES:\n1. If an answered caller says they are busy/unavailable AND explicitly asks to be called back AND provides a usable time, callbackRequested MUST be true.\n2. Examples that MUST schedule a callback: \"I'm busy, call me tomorrow at 10\", \"not a good time, call me at 6 PM\", \"I'm busy right now, call me in 30 minutes\".\n3. If the caller only says \"I'm busy\" or \"call me later\" without a usable time, callbackRequested MUST be false. Do not invent a time.\n4. If the agent asks what time is convenient and the caller then supplies a time, that is a valid callback request.\n5. A bare hour such as \"10\" means 10:00 in the caller's local timezone; resolve to the next upcoming occurrence relative to {callerNow}.\n6. Relative phrases such as \"in 30 minutes\" belong in callbackRelativeMinutes.\n7. callbackRequested MUST be false whenever callbackTimeMentioned is false.\n8. No Answer and Callback Scheduled are mutually exclusive.\n\nENQUIRY RULES:\n1. Create an enquiry only for a meaningful caller question/request that the live agent genuinely could not answer or resolve.\n2. If the agent answered it successfully, enquiryRequested=false.\n3. Busy/callback, questionnaire answers, objections, silence, no-answer, wrong-number and ordinary conversation are not enquiries.\n4. An answered call may have BOTH a valid callback and an unresolved enquiry.\n\nDo not infer actions from the summary when the transcript contradicts it. The transcript is authoritative.",
 
+
+  },
+];
+function validatePromptTemplate(id, systemPrompt) {
+  const required = REQUIRED_PLACEHOLDERS[id] || [];
+  const missing = required.filter((p) => !systemPrompt.includes(p));
+  if (missing.length) {
+    throw new Error(`System prompt must include ${missing.join(" and ")} — the pipeline substitutes the real value in at that exact spot; without it, this agent would run with no data.`);
+  }
+}
+
+const MAX_SYSTEM_PROMPT_LENGTH = 50000;
+
+async function getPromptOverrides(orgId) {
+  if (!orgId) return {};
+  const db = require("../db/repository");
+  try {
+    const org = await db.getOrg(orgId);
+    return (org && org.systemAgentPrompts) || {};
+  } catch (err) {
+    throw err;
+  }
+}
+
+// The prompt a given system agent should actually use for this org right
+// now — the org's saved override if it has one, else the shared default.
+// orgId is optional so callers with no org context (rare — e.g. a
+// dev/browser session with no org) still get a sane default instead of
+// having to special-case null.
+async function getEffectivePrompt(orgId, id) {
+  const def = SYSTEM_AGENTS.find((a) => a.id === id);
+  if (!def) return null;
+  const globalPrompt = (await getSetting(`prompt.system.${id}`, null)) || def.systemPrompt;
+  if (!orgId) return globalPrompt;
+  const overrides = await getPromptOverrides(orgId);
+  return overrides[id] || globalPrompt;
+}
+
+// The full catalog, with each entry's systemPrompt swapped for this org's
+// saved override where one exists — what GET /api/agents/system returns.
+async function getEffectiveSystemAgents(orgId) {
+  const overrides = await getPromptOverrides(orgId);
+  return Promise.all(SYSTEM_AGENTS.map(async (a) => {
+    const globalPrompt = (await getSetting(`prompt.system.${a.id}`, null)) || a.systemPrompt;
+    return {
+      ...a,
+      systemPrompt: overrides[a.id] || globalPrompt,
+      isCustomized: !!overrides[a.id],
+      defaultSystemPrompt: globalPrompt,
+    };
+  }));
+}
+
+// Saves (or, given a blank/unchanged value, clears) this org's override
+// for one system agent's prompt. Throws — the route turns that into a 400
+// — if the id is unknown or the new prompt drops a required placeholder.
+async function setPromptOverride(orgId, id, systemPrompt) {
+  const def = SYSTEM_AGENTS.find((a) => a.id === id);
+  if (!def) throw new Error(`Unknown system agent id "${id}"`);
+  const db = require("../db/repository");
+  const trimmed = (systemPrompt || "").trim();
+  if (trimmed.length > MAX_SYSTEM_PROMPT_LENGTH) throw new Error(`System prompt exceeds the ${MAX_SYSTEM_PROMPT_LENGTH} character limit`);
+
+  const globalPrompt = (await getSetting(`prompt.system.${id}`, null)) || def.systemPrompt;
+  let stored = null;
+  if (!trimmed || trimmed === globalPrompt.trim()) {
+    stored = null;
+  } else {
+    validatePromptTemplate(id, trimmed);
+    stored = trimmed;
+  }
+  await db.updateSystemAgentPrompt(orgId, id, stored);
+  return { ...def, systemPrompt: stored || globalPrompt, isCustomized: !!stored, defaultSystemPrompt: globalPrompt };
+}
+
+module.exports = { SYSTEM_AGENTS, getEffectivePrompt, getEffectiveSystemAgents, setPromptOverride, validatePromptTemplate };
