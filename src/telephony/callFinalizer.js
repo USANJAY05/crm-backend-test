@@ -43,8 +43,8 @@ function usableCallbackTime(iso) {
 function resolveConversationOutcome({ finalStatus, callAnswered, enquiryRequested, callbackRequested, transcript }) {
   if (finalStatus === "No Answer") return "no_answer";
   if (finalStatus === "Answering Machine") return "answering_machine";
-  if (finalStatus === "Callback Scheduled") return "callback_scheduled";
   if (enquiryRequested) return callbackRequested ? "callback_and_enquiry" : "enquiry";
+  if (finalStatus === "Callback Scheduled") return "callback_scheduled";
   if (callAnswered) {
     const text = String(transcript || "").toLowerCase();
     if (/\b(busy|not a good time|can't talk|cannot talk|unable to talk|call me later)\b/.test(text)) return "busy";
