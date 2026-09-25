@@ -55,7 +55,7 @@ services:
         required: true
     environment:
       NODE_ENV: ${NODE_ENV:-production}
-      SCHEDULER_PROVIDER: ${SCHEDULER_PROVIDER:-local}
+      SCHEDULER_PROVIDER: local
       QUEUE_PROVIDER: ${QUEUE_PROVIDER:-rabbitmq}
       RABBITMQ_URL: ${RABBITMQ_URL:-amqp://${RABBITMQ_USER}:${RABBITMQ_PASSWORD}@rabbitmq:5672}
       REDIS_HOST: redis
@@ -89,7 +89,7 @@ services:
         required: true
     environment:
       NODE_ENV: ${NODE_ENV:-production}
-      SCHEDULER_PROVIDER: ${SCHEDULER_PROVIDER:-bullmq}
+      SCHEDULER_PROVIDER: bullmq
       CALLBACK_SCHEDULER_RECONCILE_MS: ${CALLBACK_SCHEDULER_RECONCILE_MS:-60000}
       CALLBACK_SCHEDULER_QUEUE: ${CALLBACK_SCHEDULER_QUEUE:-crm-callback-scheduler}
       CALLBACK_SCHEDULER_CONCURRENCY: ${CALLBACK_SCHEDULER_CONCURRENCY:-1}
