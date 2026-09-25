@@ -313,11 +313,17 @@ async function finalizeCallRecord({
   // voice session's own usage row (provider "gemini") since these are a
   // different, far cheaper model (gemini-2.5-flash-lite) and should show
   // as their own cost line, not blended into voice-session cost.
-  // Legacy providers may still pass "Unknown". Persist the new canonical null\n  // value so busy/callback calls are never treated as negative/neutral.\n  sentiment = sentiment === "Unknown" ? null : sentiment;\n\n  let postCallInputTokens = sentimentInputTokens;
-  let postCallOutputTokens = sentimentOutputTokens;
-  const accumulateUsage = ({ inputTokens, outputTokens }) => {
-    postCallInputTokens += inputTokens || 0;
-    postCallOutputTokens += outputTokens || 0;
+  // Legacy providers may still pass "Unknown". Persist the new canonical null\n  // value so busy/callback calls are never treated as negative/neutral.\n  sentiment = sentiment === "Unknown" ? null : sentiment;\n\n  // Keep post-call usage in one explicit object so every agent contributes
+  // to the same metering bucket without relying on ad-hoc local variables.
+  // This also makes the final usage payload impossible to reference before
+  // declaration when the finalizer evolves.
+  const postCallUsage = {
+    inputTokens: Number(sentimentInputTokens) || 0,
+    outputTokens: Number(sentimentOutputTokens) || 0,
+  };
+  const accumulateUsage = ({ inputTokens = 0, outputTokens = 0 } = {}) => {
+    postCallUsage.inputTokens += Number(inputTokens) || 0;
+    postCallUsage.outputTokens += Number(outputTokens) || 0;
   };
   const mergedTranscriptLines = mergeTranscriptLines(transcriptLines);
   const fullTranscript = buildFullTranscript(mergedTranscriptLines);
@@ -791,12 +797,15 @@ async function finalizeCallRecord({
   // than a parallel one-off cost calculation. Fire-and-forget, same as
   // the metering calls above: usage tracking must never fail call
   // finalization.
-  if (postCallInputTokens > 0 || postCallOutputTokens > 0) {
+  if (postCallUsage.inputTokens > 0 || postCallUsage.outputTokens > 0) {
     geminiUsageTracker.startUsageSession({
       orgId, callId, provider: "post-call-agents", model: postCallAgents.MODEL, costProviderKey: "gemini-postcall",
     }).then(async (handle) => {
       if (!handle) return;
-      await geminiUsageTracker.recordUsage(handle, { inputTokens: postCallInputTokens, outputTokens: postCallOutputTokens });
+      await geminiUsageTracker.recordUsage(handle, {
+        inputTokens: postCallUsage.inputTokens,
+        outputTokens: postCallUsage.outputTokens,
+      });
       await geminiUsageTracker.finalizeUsageSession(handle);
     }).catch(err => log.error(`❌ [${provider}] post-call-agents usage tracking error:`, err.message));
   }
