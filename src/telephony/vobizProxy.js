@@ -2333,11 +2333,8 @@ async function processPostCallData({
     attemptNumber,
     retryContext,
     providerCallSid,
-    followUp,
-    // Token usage from the sentiment + follow-up-safety-net calls already
-    // made above — callFinalizer folds these into the same
-    // "gemini-postcall" cost-tracking session as its own workflow-answers/
-    // summary calls, instead of this usage going untracked.
+    // Scheduling/enquiry extraction is owned by callFinalizer and runs once
+    // after summary, with the final sentiment available.
     sentimentInputTokens,
     sentimentOutputTokens,
   });
