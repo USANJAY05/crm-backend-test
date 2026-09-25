@@ -92,6 +92,36 @@ async function getModelForOrg(orgId = null) {
 // working unchanged. Not called on a genuinely failed request (network
 // error, bad credentials) since there's no usage to report; a fallback
 // value being returned isn't itself a cost.
+function describeSchema(schema) {
+  const seen = new Set();
+  function describe(node, depth = 0) {
+    if (!node || depth > 5) return "unknown";
+    const def = node._def || {};
+    const typeName = def.typeName || "";
+    if (typeName === "ZodObject") {
+      const shape = typeof def.shape === "function" ? def.shape() : (def.shape || {});
+      return "object{" + Object.entries(shape).map(([key, value]) => `${key}:${describe(value, depth + 1)}`).join(",") + "}";
+    }
+    if (typeName === "ZodArray") return "array<" + describe(def.type, depth + 1) + ">";
+    if (typeName === "ZodOptional") return describe(def.innerType, depth + 1) + "?";
+    if (typeName === "ZodNullable") return describe(def.innerType, depth + 1) + "|null";
+    if (typeName === "ZodDefault") return describe(def.innerType, depth + 1);
+    if (typeName === "ZodString") return "string";
+    if (typeName === "ZodNumber") return "number";
+    if (typeName === "ZodBoolean") return "boolean";
+    if (typeName === "ZodEnum") return "enum[" + (def.values || []).join("|") + "]";
+    if (typeName === "ZodLiteral") return "literal(" + JSON.stringify(def.value) + ")";
+    if (typeName === "ZodUnion") return "union[" + (def.options || []).map(x => describe(x, depth + 1)).join("|") + "]";
+    if (typeName === "ZodRecord") return "record";
+    if (typeName === "ZodAny") return "any";
+    if (typeName === "ZodUnknown") return "unknown";
+    return typeName || "unknown";
+  }
+  if (!schema || seen.has(schema)) return "object";
+  seen.add(schema);
+  return describe(schema);
+}
+
 function extractJsonObject(content) {
   if (content == null) return null;
   const text = Array.isArray(content)
@@ -118,7 +148,10 @@ async function generateStructured({ prompt, schema, fallback, label, onUsage, or
     // post-call agent fail in production. Keep structured output provider-
     // independent: ask for strict JSON, invoke the normal chat model, then
     // validate the result with the same Zod schema.
-    const result = await model.invoke(`${prompt}\n\nReturn ONLY one valid JSON object matching this schema. Do not use markdown or code fences. Schema:\n${JSON.stringify(schema?._def || {})}`);
+    const schemaDescription = describeSchema(schema);
+    const request = `${prompt}\n\nReturn ONLY one valid JSON object matching this schema. Do not use markdown or code fences. Schema:\n${schemaDescription}`;
+    log.info(`🔎 [postCallAgents:${label}] request size: promptChars=${promptChars}, schemaChars=${schemaDescription.length}, totalRequestChars=${request.length}`);
+    const result = await model.invoke(request);
     const raw = result;
     const parsedObject = extractJsonObject(result?.content);
     if (!parsedObject) throw new Error("Model returned no valid JSON object");
@@ -143,6 +176,7 @@ async function generateStructured({ prompt, schema, fallback, label, onUsage, or
         usage.candidatesTokenCount ??
         0
       ) || 0;
+      log.info(`📊 [postCallAgents:${label}] usage: inputTokens=${inputTokens}, outputTokens=${outputTokens}`);
       // Usage metering is observational. A billing callback must never be
       // allowed to turn a successful AI generation into a failed agent.
       try {
