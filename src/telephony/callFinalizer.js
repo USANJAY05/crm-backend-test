@@ -40,10 +40,7 @@ function usableCallbackTime(iso) {
   return parsed.toISOString();
 }
 
-const DEFAULT_CALLBACK_DELAY_MS = 2 * 60 * 60 * 1000;
-
-// One decision for busy-callback vs human enquiry. Either post-call agent
-// requesting a callback wins; enquiry is only saved when neither does.
+// One validated post-call decision controls callback and enquiry actions.
 function resolvePostCallOutcome({
   scheduling,
   isMachineDetected,
@@ -295,18 +292,10 @@ async function finalizeCallRecord({
     timestamp: new Date().toTimeString().split(" ")[0],
   }));
 
-  // Picked up but never actually engaged — cut the call quickly, said
-  // nothing, or gave one throwaway word ("wrong number", "no") before
-  // hanging up. This is a real, separate outcome from `status`: such a
-  // call still ends up "Completed" (someone did pick up, it wasn't a
-  // machine, they never asked for a callback) but no real conversation
-  // happened, which every downstream sentiment/summary/conversion number
-  // was silently treating the same as an actual answered call. Counting
-  // the caller's OWN words (not the AI's) across the whole transcript is
-  // a simple, explainable proxy for "did they actually talk" — no extra
-  // LLM call needed, and it's monotonic with duration/effort, not just a
-  // duration cutoff (a caller can talk plenty in a short call, or say
-  // nothing at all in a long one where the AI just kept talking).
+  // Any finalized caller speech means the call was answered for purposes
+  // of conversational post-processing. A zero-word caller transcript is
+  // kept out of the conversational callback/enquiry pipeline so no-answer
+  // and machine outcomes remain separate.
   const callerWordCount = mergedTranscriptLines
     .filter(l => l.role === "user")
     .reduce((sum, l) => sum + l.text.trim().split(/\s+/).filter(Boolean).length, 0);
