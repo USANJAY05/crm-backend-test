@@ -154,7 +154,8 @@ const ENTITIES = {
       retryConfig: "retry_config",
       // See mysql.js's dialer_tasks.workflow_id column comment — was
       // never persisted at all before, only living in frontend memory.
-      workflowId: "workflow_id"
+      workflowId: "workflow_id",
+      workflowRunMetadata: "workflow_run_metadata"
     }
   },
   inboundcalllogs: {
