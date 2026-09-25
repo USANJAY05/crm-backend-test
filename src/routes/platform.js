@@ -572,7 +572,24 @@ router.post("/organizations/:id/numbers", async (req, res) => {
 
 router.delete("/organizations/:id/numbers/:numberId", async (req, res) => {
   try {
+    const numbers = await db.list("numbers", req.params.id);
+    const numberRow = (numbers || []).find((n) => n.id === req.params.numberId);
+
     await db.remove("numbers", req.params.id, req.params.numberId);
+
+    // Keep provider-channel state in sync with the virtual-number removal.
+    // channels(type, external_id) is globally unique, so a stale Vobiz row
+    // would make the number look "already assigned" when reconnecting it.
+    if (numberRow?.number) {
+      const supabase = require("../db/client");
+      await supabase
+        .from("channels")
+        .delete()
+        .eq("org_id", req.params.id)
+        .eq("type", "vobiz")
+        .eq("external_id", numberRow.number);
+    }
+
     res.json({ ok: true });
   } catch (err) { handleError(err, res); }
 });

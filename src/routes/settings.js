@@ -44,7 +44,26 @@ router.patch("/numbers/:id", requireAuth, requireRole(ADMIN_ROLES), async (req, 
 
 router.delete("/numbers/:id", requireAuth, requireRole(ADMIN_ROLES), async (req, res) => {
   try {
+    // A Vobiz number has two related records: the virtual-number entry used
+    // by the CRM UI and the channel row used for the provider credentials.
+    // Removing only the virtual number leaves the globally-unique
+    // channels(type, external_id) row behind, so the same number cannot be
+    // connected again later. Capture the number before deleting it and clean
+    // up the corresponding Vobiz channel as part of the same removal flow.
+    const numbers = await db.list("numbers", req.orgId);
+    const numberRow = (numbers || []).find((n) => n.id === req.params.id);
     await db.remove("numbers", req.orgId, req.params.id);
+
+    if (numberRow?.number) {
+      const supabase = require("../db/client");
+      await supabase
+        .from("channels")
+        .delete()
+        .eq("org_id", req.orgId)
+        .eq("type", "vobiz")
+        .eq("external_id", numberRow.number);
+    }
+
     res.json({ success: true });
   } catch (err) { res.status(500).json({ error: safeErrorMessage(err) }); }
 });

@@ -579,6 +579,19 @@ async function replaceNumbers(orgId, apiArray) {
   });
 
   const keepIds = rows.map((r) => r.id).filter(Boolean);
+  // A Vobiz number also owns a channel row. If a number disappears from the
+  // synced virtual-number list (or is changed to a different number), remove
+  // its stale Vobiz channel too; channels.type + external_id is globally
+  // unique, so leaving it behind prevents the number from being connected
+  // again after removal.
+  const incomingNumbers = new Set(
+    rows.map((r) => String(r.number || "").trim()).filter(Boolean)
+  );
+  const removedNumbers = (existing || [])
+    .map((r) => String(r.number || "").trim())
+    .filter((number) => number && !incomingNumbers.has(number));
+
+  const keepIds = rows.map((r) => r.id).filter(Boolean);
   const table = "virtual_numbers";
   const tableDef = supabase.TABLES && supabase.TABLES[table];
   const client = await _pool.connect();
@@ -592,6 +605,16 @@ async function replaceNumbers(orgId, apiArray) {
     } else {
       await client.query(`DELETE FROM ${table} WHERE org_id = $1`, [orgId]);
     }
+
+    if (removedNumbers.length) {
+      await client.query(
+        `DELETE FROM channels
+         WHERE org_id = ? AND type = "vobiz"
+           AND external_id IN (${removedNumbers.map(() => "?").join(",")})`,
+        [orgId, ...removedNumbers]
+      );
+    }
+
     const result = [];
     for (const apiRow of rows) {
       const row = { ...apiRow };
