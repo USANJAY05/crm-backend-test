@@ -22,6 +22,7 @@ const CALL_TYPES = ["INBOUND", "OUTBOUND"];
 
 const MASTER_PROMPT_INBOUND = `You are {{agent_name}}, a voice agent answering an incoming phone call for {{company_name}} ({{industry}}).
 
+{{language_prompt}}
 Speak in {{language}}, using the {{dialect}} dialect.
 {{dialect_profile}}
 Natural phrasing examples for this dialect (guidance only — do not repeat these verbatim, adapt naturally to the conversation):
@@ -106,7 +107,7 @@ function interpolate(template, values) {
  * @param {string} [vars.businessContext]
  * @param {"INBOUND"|"OUTBOUND"} vars.callType
  */
-function buildFinalPrompt(vars = {}, templateOverride = null) {
+function buildFinalPrompt(vars = {}, templateOverride = null, promptConfig = {}) {
   const callType = String(vars.callType || "INBOUND").toUpperCase();
   if (!MASTER_PROMPTS[callType]) {
     throw new Error(`Unknown call_type "${vars.callType}" — expected one of ${CALL_TYPES.join(", ")}`);
@@ -119,14 +120,15 @@ function buildFinalPrompt(vars = {}, templateOverride = null) {
   const dialect = vars.dialect?.trim() || "";
   const businessContext = vars.businessContext?.trim() || "No additional business details were provided — rely only on what the caller tells you and offer to have a team member follow up for anything you can't confirm.";
 
-  const resolvedDialect = getDialectProfile(language, dialect);
-  const dialectLabel = resolvedDialect ? resolvedDialect.dialect : dialect || `standard ${language}`;
-  const dialectProfileText = resolvedDialect
-    ? resolvedDialect.profile
-    : "No specific dialect profile is configured — speak in clear, natural, professional language.";
-  const dialectExamplesText = resolvedDialect && resolvedDialect.examples?.length
-    ? resolvedDialect.examples.map((ex) => `- ${ex}`).join("\n")
+  const resolvedDialect = promptConfig.dialect || getDialectProfile(language, dialect);
+  const dialectLabel = resolvedDialect ? (resolvedDialect.dialect || dialect) : dialect || `standard ${language}`;
+  const dialectProfileText = promptConfig.dialectPrompt || resolvedDialect?.profile ||
+    "No specific dialect profile is configured — speak in clear, natural, professional language.";
+  const dialectExamples = promptConfig.dialectExamples || resolvedDialect?.examples || [];
+  const dialectExamplesText = dialectExamples.length
+    ? dialectExamples.map((ex) => `- ${ex}`).join("\n")
     : "- (no examples configured for this dialect)";
+  const languagePromptText = promptConfig.languagePrompt || "Speak naturally and clearly in {{language}}. Use correct grammar, natural vocabulary, and culturally appropriate phrasing for the selected dialect. Do not translate word-for-word from English.";
 
   const values = {
     agent_name: agentName,
@@ -137,6 +139,7 @@ function buildFinalPrompt(vars = {}, templateOverride = null) {
     dialect_profile: dialectProfileText,
     dialect_examples: dialectExamplesText,
     business_context: businessContext,
+    language_prompt: languagePromptText.replace(/\{\{language\}\}/g, language),
     call_type: callType,
   };
 
