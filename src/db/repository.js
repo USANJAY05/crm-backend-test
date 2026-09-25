@@ -578,7 +578,6 @@ async function replaceNumbers(orgId, apiArray) {
     return row;
   });
 
-  const keepIds = rows.map((r) => r.id).filter(Boolean);
   // A Vobiz number also owns a channel row. If a number disappears from the
   // synced virtual-number list (or is changed to a different number), remove
   // its stale Vobiz channel too; channels.type + external_id is globally
