@@ -425,7 +425,7 @@ async function finalizeCallRecord({
   const {
     finalStatus, callbackRequested, enquiryRequested, callbackTimeToStore, callbackReasonToStore,
     enquirySummary, callerName: outcomeCallerName, conversationOutcome: initialConversationOutcome,
-    callbackStatus, enquiryStatus,
+    callbackStatus, enquiryStatus, retryFieldsToSave,
   } = resolvePostCallOutcome({
     scheduling,
     isMachineDetected,
