@@ -21,6 +21,7 @@
 const db = require("../db/repository");
 const objectsEngine = require("../crm/objectsEngine");
 const postCallAgents = require("../ai/postCallAgents");
+const { normalizeQuestions, validateWorkflowAnswers } = require("../ai/postCallAgents/workflowAnswersAgent");
 const storage = require("../storage");
 const geminiUsageTracker = require("../ai/geminiUsageTracker");
 const { getLogger } = require("../observability/logger");
@@ -348,12 +349,14 @@ async function finalizeCallRecord({
   // Scheduling & Enquiry Agent can see both summary and sentiment. Only that
   // agent is allowed to decide callback/enquiry actions.
   let callAnswers = [];
+  let workflowQuestions = null;
+  let workflowValidation = { complete: true, missingQuestions: [], requiredQuestions: [] };
   try { callAnswers = await db.getResponsesByCallId(orgId, callId); } catch {}
   if (!callAnswers.length && transcriptLines.length > 0) {
-    const questions = getWorkflowQuestions();
-    if (questions?.length) {
+    workflowQuestions = getWorkflowQuestions();
+    if (workflowQuestions?.length) {
       try {
-        callAnswers = await postCallAgents.extractWorkflowAnswers(fullTranscript, questions, orgId, accumulateUsage);
+        callAnswers = await postCallAgents.extractWorkflowAnswers(fullTranscript, workflowQuestions, orgId, accumulateUsage);
       } catch (err) {
         log.error(`❌ [${provider}] workflow answer extraction failed; continuing call finalization:`, err.message);
         callAnswers = [];
@@ -365,6 +368,22 @@ async function finalizeCallRecord({
           createdAt: new Date().toISOString(),
         }).catch(() => {});
       }
+    }
+  }
+
+  // Strict workflow gate: every question is mandatory unless the workflow
+  // explicitly marks it optional (or required=false). This runs after both
+  // saved live-tool answers and post-call transcript extraction, so lead
+  // creation can never bypass the rule.
+  if (!workflowQuestions) {
+    workflowQuestions = getWorkflowQuestions();
+  }
+  if (workflowQuestions?.length) {
+    workflowValidation = validateWorkflowAnswers(workflowQuestions, callAnswers);
+    if (!workflowValidation.complete) {
+      log.warn(
+        `⚠️ [${provider}] Workflow incomplete for call ${callId}; lead creation/promotion blocked. Missing: ${workflowValidation.missingQuestions.map((q) => q.label || q.question).join(", ")}`
+      );
     }
   }
 
@@ -476,7 +495,14 @@ async function finalizeCallRecord({
     sentiment === "Positive" &&
     callAnswered &&
     !enquiryRequested &&
-    !callbackTimeToStore;
+    !callbackTimeToStore &&
+    workflowValidation.complete;
+
+  if (!workflowValidation.complete) {
+    log.info(
+      `🚫 [${provider}] Lead creation/promotion skipped for call ${callId}: mandatory workflow data is incomplete.`
+    );
+  }
 
   if (positiveLeadCandidate) {
     try {
