@@ -100,7 +100,13 @@ async function authorizeOutboundCall(orgId, { providerKey = "vobiz" } = {}) {
           ? `Insufficient recharge balance. Available ₹${available.toFixed(2)}, estimated call reservation ₹${amount.toFixed(2)}.`
           : "Recharge balance is empty. Please recharge the organization before placing outbound calls."
       );
+      // Keep a stable machine-readable reason all the way through the
+      // telephony connector and background dialer. Some error wrappers
+      // preserve the message but drop statusCode, so auto-dial must not
+      // depend on HTTP semantics to recognize a wallet block.
       err.statusCode = 402;
+      err.code = "INSUFFICIENT_RECHARGE_BALANCE";
+      err.isRechargeBillingError = true;
       throw err;
     }
 
