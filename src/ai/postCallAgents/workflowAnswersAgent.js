@@ -35,6 +35,7 @@ function normalizeQuestions(questions) {
           label: q.label || q.question,
           question: q.question || q.label,
           dataType: q.dataType,
+          options: Array.isArray(q.options) ? q.options : (Array.isArray(q.choices) ? q.choices : []),
           // Workflow questions are mandatory by default. Only an explicit
           // optional flag makes a question skippable.
           optional: q.optional === true || q.required === false,
@@ -116,6 +117,29 @@ function isUsableWorkflowAnswer(answer) {
   return !/^(?:unknown|n\/a|na|not provided|not answered|no answer|unanswered|null|undefined)$/i.test(value);
 }
 
+function isValidWorkflowAnswer(answer, question) {
+  if (!isUsableWorkflowAnswer(answer)) return false;
+  const value = String(answer).trim();
+  const type = String(question?.dataType || "text").toLowerCase();
+
+  if (type === "number") {
+    return /^[-+]?\\d+(?:[.,]\\d+)?$/.test(value.replace(/,/g, ""));
+  }
+  if (type === "boolean") {
+    return /^(?:yes|no)$/i.test(value);
+  }
+  if (type === "date") {
+    const parsed = new Date(value);
+    return !Number.isNaN(parsed.getTime());
+  }
+  if (type === "choice" && Array.isArray(question?.options) && question.options.length) {
+    return question.options.some((option) =>
+      String(option?.label ?? option?.value ?? option).trim().toLowerCase() === value.toLowerCase()
+    );
+  }
+  return true;
+}
+
 /**
  * Strict workflow completion gate.
  *
@@ -146,7 +170,7 @@ function validateWorkflowAnswers(questions, answers) {
     .filter((q) => {
       const answer = byQuestion.get(String(q.question || "").trim().toLowerCase())
         ?? byLabel.get(String(q.label || "").trim().toLowerCase());
-      return !isUsableWorkflowAnswer(answer);
+      return !isValidWorkflowAnswer(answer, q);
     })
     .map((q) => ({
       label: q.label,
@@ -165,4 +189,4 @@ function validateWorkflowAnswers(questions, answers) {
   };
 }
 
-module.exports = { normalizeQuestions, extractWorkflowAnswers, validateWorkflowAnswers, isUsableWorkflowAnswer };
+module.exports = { normalizeQuestions, extractWorkflowAnswers, validateWorkflowAnswers, isUsableWorkflowAnswer, isValidWorkflowAnswer };
