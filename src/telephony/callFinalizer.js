@@ -512,8 +512,11 @@ async function finalizeCallRecord({
       new Promise((_, reject) => setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms)),
     ]);
 
+  // Durable completion boundary: only the call-log DB write is retryable.
+  // Post-persistence side effects must never replay the whole finalizer.
+  let savedLog = null;
   try {
-    const savedLog = await withTimeout(
+    savedLog = await withTimeout(
       db.create("calllogs", orgId, {
         id: callId,
         leadId,
@@ -538,35 +541,33 @@ async function finalizeCallRecord({
       `[${provider}] calllogs insert for call ${callId}`
     );
     log.info(`📼 [${provider}] Call logged: ${callerNumber} (${durationSeconds}s, ${sentiment})`);
-    if (global.broadcastLog) {
-      // Include answers (key-value pairs from workflow variables) in the
-      // broadcast so the frontend can store them in callResults without a
-      // separate API round-trip. providerCallSid is the telephony
-      // provider's own call id (Vobiz CallUUID / Twilio CallSid / Piopiy
-      // call id) — the SAME id the frontend already holds the moment it
-      // places the call (DialerSimulator.tsx's vobizCallSid etc, set from
-      // the initiate-call API's response). Broadcasting it lets the
-      // frontend match "this broadcast is MY active call" by exact id
-      // instead of comparing phone number strings, which silently never
-      // matched whenever the lead's stored number and the provider's
-      // reported callerNumber differed in country-code formatting (e.g.
-      // "6384670687" vs "+916384670687") — confirmed root cause of the
-      // dialer UI staying stuck on "connected" even though this row and
-      // broadcast fired correctly.
-      // callAnswers is the raw {label, question, answer}[] array (see its
-      // declaration above) — must be converted to a {[label]: answer} map
-      // here, same as callResults[leadId].answers below, or the frontend
-      // (CallLogsView.tsx's Workflow Answers table) ends up trying to
-      // render a raw {label, question, answer} object as a table cell,
-      // which crashes with React error #31 ("Objects are not valid as a
-      // React child") the instant a call_completed broadcast for a call
-      // with any workflow answers arrives.
+  } catch (err) {
+    const duplicate = /duplicate entry|duplicate key|unique constraint|already exists/i.test(err.message || "");
+    if (duplicate) {
+      try {
+        savedLog = (await db.list("calllogs", orgId)).find(row => String(row.id) === String(callId)) || null;
+      } catch (lookupErr) {
+        log.error(`❌ [${provider}] Existing call log lookup failed for ${callId}:`, lookupErr.message);
+      }
+      if (!savedLog) throw err;
+      log.warn(`⚠️ [${provider}] Call log ${callId} already exists; continuing idempotently.`);
+    } else {
+      log.error(`❌ [${provider}] call_logs insert error for call ${callId}:`, err.message);
+      throw err;
+    }
+  }
+
+  // Everything after persistence is best-effort. Failure here must not make
+  // RabbitMQ replay a call whose DB row already exists.
+  try {
+    if (global.broadcastLog && savedLog) {
       const answersMap = Object.fromEntries((callAnswers || []).map((a) => [a.label || a.question, a.answer]));
-      // In STORAGE_USE_SIGNED_URLS mode, savedLog.recordingUrl is a bare
-      // object key, not a playable link — resolve it the same way the
-      // /api/call-logs GET route does, so the live "call just completed"
-      // broadcast is immediately playable too, not just on next refetch.
-      const resolvedRecordingUrl = await storage.resolvePlaybackUrl(savedLog.recordingUrl);
+      let resolvedRecordingUrl = savedLog.recordingUrl;
+      try {
+        resolvedRecordingUrl = await storage.resolvePlaybackUrl(savedLog.recordingUrl);
+      } catch (urlErr) {
+        log.warn(`⚠️ [${provider}] Recording URL resolution failed for ${callId}; using stored URL.`, urlErr.message);
+      }
       const enrichedLog = { ...savedLog, recordingUrl: resolvedRecordingUrl, answers: answersMap };
       global.broadcastLog(`📼 [${provider}] Call logged: ${callerNumber} (${durationSeconds}s, ${sentiment})`, { type: "call_completed", orgId, callLog: enrichedLog, providerCallSid });
     }
@@ -574,8 +575,7 @@ async function finalizeCallRecord({
       log.info(`📅 [${provider}] Callback scheduled for ${callerNumber} — next attempt ${retryFieldsToSave.nextRetryAt}`);
     }
   } catch (err) {
-    log.error(`❌ [${provider}] call_logs insert error for call ${callId}:`, err.message);
-    throw err; // let the job queue's retry policy take over instead of silently dropping this call
+    log.error(`⚠️ [${provider}] Post-persistence notification failed for ${callId}:`, err.message);
   }
 
   // If this call was placed for a dialer task (retryContext.taskId/leadId —
