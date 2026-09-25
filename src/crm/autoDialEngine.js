@@ -421,18 +421,27 @@ async function handlePlaceDialJob(data) {
   } catch (err) {
     log.error(`❌ [autoDialEngine] Failed to dial lead ${leadId} for task ${taskId} (org ${orgId}):`, err.message);
 
-    if (err.statusCode === 403) {
-      // A compliance block (quiet hours, DND, missing consent, etc) applies
-      // org-wide, not just to this one lead — pause the whole task instead
-      // of burning through every remaining lead marking each one failed
-      // for the identical reason within the next few poll ticks.
+    if (err.statusCode === 403 || err.statusCode === 402) {
+      // Compliance blocks and recharge/billing blocks apply to the whole
+      // task. Pause immediately so the scheduler cannot retry the same
+      // lead every few seconds, and broadcast the exact reason to the UI.
       await db.patch("dialertasks", orgId, taskId, {
-        currentLeadId: null, currentCallStartedAt: null,
-        autoDialEnabled: false, autoDialStatus: "paused",
+        currentLeadId: null,
+        currentCallStartedAt: null,
+        autoDialEnabled: false,
+        autoDialStatus: "paused",
+        ...(err.statusCode === 402 ? { autoDialBlockedReason: "insufficient_balance" } : {}),
       }).catch(() => {});
+
       if (global.broadcastLog) {
         global.broadcastLog(`🤖 Auto-dial task "${taskName}" paused — ${err.message}`, {
-          type: "auto_dial_progress", orgId, taskId, status: "paused",
+          type: "auto_dial_progress",
+          orgId,
+          taskId,
+          status: "paused",
+          reason: err.statusCode === 402 ? "insufficient_balance" : "compliance_blocked",
+          severity: err.statusCode === 402 ? "warning" : "error",
+          message: err.message,
         });
       }
       return;
