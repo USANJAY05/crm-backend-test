@@ -225,7 +225,11 @@ const TABLES = {
       // One-line reason the caller asked for a callback (extractFollowUp's
       // querySummary) — only ever set alongside status "Callback
       // Scheduled". Powers the Scheduled Callbacks tab.
-      callback_reason: "text"
+      callback_reason: "text",
+      // Canonical post-call action state. These fields are written by the
+      // finalizer so every UI surface can render the same outcome without
+      // re-interpreting status/retry/callback/enquiry independently.
+      conversation_outcome: "text", callback_status: "text", enquiry_status: "text"
     }
   },
   dialer_tasks: {
@@ -261,7 +265,10 @@ const TABLES = {
       // Campaign-level retry policy for unanswered calls. Stored directly
       // on the task so server-side auto-dial and retry workers remain
       // independent of the browser.
-      retry_config: "json"
+      retry_config: "json",
+      // Immutable metadata identifying the workflow run that created this
+      // dialing task. The same workflow can be launched many times.
+      workflow_run_metadata: "json"
     }
   },
   inbound_call_logs: {

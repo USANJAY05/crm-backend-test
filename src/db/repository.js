@@ -119,7 +119,10 @@ const ENTITIES = {
       callAnswered: "call_answered",
       // One-line reason for a "Callback Scheduled" call — see
       // callFinalizer.js's followUp.querySummary.
-      callbackReason: "callback_reason"
+      callbackReason: "callback_reason",
+      conversationOutcome: "conversation_outcome",
+      callbackStatus: "callback_status",
+      enquiryStatus: "enquiry_status"
     }
   },
   dialertasks: {
@@ -151,7 +154,8 @@ const ENTITIES = {
       retryConfig: "retry_config",
       // See mysql.js's dialer_tasks.workflow_id column comment — was
       // never persisted at all before, only living in frontend memory.
-      workflowId: "workflow_id"
+      workflowId: "workflow_id",
+      workflowRunMetadata: "workflow_run_metadata"
     }
   },
   inboundcalllogs: {
