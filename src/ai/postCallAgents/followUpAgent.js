@@ -30,6 +30,55 @@ const { nowInTimezone, zonedTimeToUtc } = require("../../lib/timezoneConvert");
 const db = require("../../db/repository");
 const { deriveTranscriptSignals } = require("./decisionEngine");
 
+const LOCAL_DATETIME_RE = /^\d{4}-\d{2}-\d{2}T(?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d$/;
+
+function hasExplicitRelativeTime(text) {
+  return /\b(?:in\s+\d+\s*(?:minutes?|mins?|hours?|hrs?)|\d+\s*(?:minutes?|mins?|hours?|hrs?)\s+(?:later|from\s+now))\b/i.test(text);
+}
+
+function hasClockTime(text) {
+  return /\b(?:at\s+)?\d{1,2}(?::\d{2})?\s*(?:am|pm)\b|\b(?:at\s+)\d{1,2}:\d{2}\b/i.test(text);
+}
+
+function resolveSpecificCallbackTime(localDateTime, timeZone, callerText) {
+  if (!LOCAL_DATETIME_RE.test(String(localDateTime || ""))) return null;
+
+  let resolved = zonedTimeToUtc(localDateTime, timeZone);
+  if (!resolved) return null;
+
+  // A caller saying only "2 PM" means the next occurrence of 2 PM in the
+  // caller's timezone. If 2 PM has already passed today, schedule tomorrow
+  // at the same wall-clock time instead of rejecting the callback.
+  if (resolved.getTime() <= Date.now() && hasClockTime(callerText)) {
+    const parts = String(localDateTime).match(
+      /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})$/
+    );
+    if (!parts) return null;
+    const nextDayLocal = new Date(
+      Date.UTC(
+        Number(parts[1]),
+        Number(parts[2]) - 1,
+        Number(parts[3]) + 1,
+        Number(parts[4]),
+        Number(parts[5]),
+        Number(parts[6])
+      )
+    );
+    const yyyy = nextDayLocal.getUTCFullYear();
+    const mm = String(nextDayLocal.getUTCMonth() + 1).padStart(2, "0");
+    const dd = String(nextDayLocal.getUTCDate()).padStart(2, "0");
+    const hh = String(nextDayLocal.getUTCHours()).padStart(2, "0");
+    const mi = String(nextDayLocal.getUTCMinutes()).padStart(2, "0");
+    const ss = String(nextDayLocal.getUTCSeconds()).padStart(2, "0");
+    resolved = zonedTimeToUtc(
+      `${yyyy}-${mm}-${dd}T${hh}:${mi}:${ss}`,
+      timeZone
+    );
+  }
+
+  return resolved && resolved.getTime() > Date.now() ? resolved : null;
+}
+
 const FollowUpSchema = z.object({
   callbackRequested: z.boolean().default(false),
   callbackTimeMentioned: z.boolean().default(false),
@@ -69,7 +118,7 @@ async function extractFollowUp(
     .replace("{sentiment}", sentiment == null ? "null" : String(sentiment))
     .replace("{summary}", summary || "(No summary available.)")
     .replace("{transcript}", transcript)
-    + `\n\nMANDATORY SCHEDULING POLICY (overrides legacy wording):\n- Only schedule a callback when the caller explicitly wants a callback AND gives a usable time. Never invent a time and never default to two hours.\n- "later", "sometime", or "whenever" without a time means no callback.\n- HARD SEPARATION: No Answer, no-response, unanswered ringing, silence, wrong-number, and answering-machine calls are NOT callback requests. They must return callbackRequested=false, callbackTimeMentioned=false, callbackRelativeMinutes=null, and callbackLocalDateTime=null. The retry engine handles No Answer separately.
+    + `\n\nMANDATORY SCHEDULING POLICY (overrides legacy wording):\n- Only schedule a callback when the caller explicitly wants a callback AND gives a usable time. Never invent a time and never default to two hours.\n- Relative time must be interpreted from the CURRENT CALLER LOCAL TIME: "5 minutes later", "5 mins later", "in 5 minutes", "in 1 hour" -> return the exact relative minutes; application code computes the actual UTC schedule.\n- Clock times must be returned in strict local format YYYY-MM-DDTHH:mm:ss with no timezone suffix. If the caller says "2 PM" and it is already after 2 PM in the caller timezone, schedule the NEXT DAY at 14:00.\n- "later", "sometime", or "whenever" without a usable time means no callback.\n- HARD SEPARATION: No Answer, no-response, unanswered ringing, silence, wrong-number, and answering-machine calls are NOT callback requests. They must return callbackRequested=false, callbackTimeMentioned=false, callbackRelativeMinutes=null, and callbackLocalDateTime=null. The retry engine handles No Answer separately.
 - A caller who actually answered and says "I'm busy" is still not a callback until they explicitly request one and provide a usable time.\n- Enquiry means only a meaningful caller question/request that the live agent genuinely could not answer or resolve. If the agent answered it, no enquiry.\n- A valid callback and a valid unresolved enquiry may both exist on the same answered call.\n- Sentiment ${sentiment == null ? "null" : sentiment} is context only; do not turn busy into Negative.\n\nCURRENT CALLER LOCAL TIME: ${nowInTimezone(timeZone)}\nCURRENT SENTIMENT: ${sentiment == null ? "null" : sentiment}\nCURRENT SUMMARY: ${summary || "(none)"}`;
 
   const result = await generateStructured({
