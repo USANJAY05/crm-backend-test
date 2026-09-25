@@ -40,6 +40,19 @@ function usableCallbackTime(iso) {
   return parsed.toISOString();
 }
 
+function resolveConversationOutcome({ finalStatus, callAnswered, enquiryRequested, callbackRequested, transcript }) {
+  if (finalStatus === "No Answer") return "no_answer";
+  if (finalStatus === "Answering Machine") return "answering_machine";
+  if (finalStatus === "Callback Scheduled") return "callback_scheduled";
+  if (enquiryRequested) return callbackRequested ? "callback_and_enquiry" : "enquiry";
+  if (callAnswered) {
+    const text = String(transcript || "").toLowerCase();
+    if (/\b(busy|not a good time|can't talk|cannot talk|unable to talk|call me later)\b/.test(text)) return "busy";
+    return "completed";
+  }
+  return "completed";
+}
+
 // One validated post-call decision controls callback and enquiry actions.
 function resolvePostCallOutcome({
   scheduling,
@@ -92,10 +105,20 @@ function resolvePostCallOutcome({
     };
   }
 
+  const conversationOutcome = resolveConversationOutcome({
+    finalStatus,
+    callAnswered,
+    enquiryRequested,
+    callbackRequested,
+    transcript: ""
+  });
   return {
     finalStatus,
     callbackRequested,
     enquiryRequested,
+    conversationOutcome,
+    callbackStatus: callbackRequested ? "scheduled" : "none",
+    enquiryStatus: enquiryRequested ? "open" : "none",
     callbackTimeToStore: callbackRequested ? usableCallbackTime(decision.callbackTime) : null,
     callbackReasonToStore: callbackRequested ? "Caller requested a callback at a specific time." : null,
     enquirySummary: enquiryRequested ? decision.enquirySummary : null,
@@ -401,7 +424,8 @@ async function finalizeCallRecord({
 
   const {
     finalStatus, enquiryRequested, callbackTimeToStore, callbackReasonToStore,
-    enquirySummary, retryFieldsToSave, callerName: outcomeCallerName,
+    enquirySummary, callerName: outcomeCallerName, conversationOutcome: initialConversationOutcome,
+    callbackStatus, enquiryStatus,
   } = resolvePostCallOutcome({
     scheduling,
     isMachineDetected,
@@ -410,6 +434,14 @@ async function finalizeCallRecord({
     callAnswered,
     direction,
     callerNumber,
+  });
+
+  const conversationOutcome = resolveConversationOutcome({
+    finalStatus,
+    callAnswered,
+    enquiryRequested,
+    callbackRequested: !!callbackTimeToStore,
+    transcript: fullTranscript,
   });
 
   if (enquiryRequested && enquirySummary) {
@@ -535,6 +567,9 @@ async function finalizeCallRecord({
         callbackTime: callbackTimeToStore,
         callbackReason: callbackReasonToStore,
         callAnswered,
+        conversationOutcome,
+        callbackStatus,
+        enquiryStatus,
         ...retryFieldsToSave,
       }),
       CALL_LOG_INSERT_TIMEOUT_MS,
@@ -606,6 +641,9 @@ async function finalizeCallRecord({
           callbackTime: callbackTimeToStore,
           callbackReason: callbackReasonToStore,
           callAnswered,
+          conversationOutcome,
+          callbackStatus,
+          enquiryStatus,
           // Calls placed through the job queue (autoDialEngine.js's
           // continuous dialer, dialerRetryEngine.js's auto-redials) land
           // here instead of DialerSimulator.tsx's own handleHangupCall,
