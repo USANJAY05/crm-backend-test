@@ -40,7 +40,7 @@ async function analyzeSentiment(transcript, orgId = null, workflowAnswers = []) 
     return { sentiment: parsed?.sentiment ?? null, inputTokens, outputTokens };
   } catch (err) {
     log.error("❌ [postCallAgents:sentiment] error:", err.message);
-    return { sentiment: "Unknown", inputTokens: 0, outputTokens: 0 };
+    return { sentiment: null, inputTokens: 0, outputTokens: 0 };
   }
 }
 
