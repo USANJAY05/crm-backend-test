@@ -423,7 +423,7 @@ async function finalizeCallRecord({
   };
 
   const {
-    finalStatus, enquiryRequested, callbackTimeToStore, callbackReasonToStore,
+    finalStatus, callbackRequested, enquiryRequested, callbackTimeToStore, callbackReasonToStore,
     enquirySummary, callerName: outcomeCallerName, conversationOutcome: initialConversationOutcome,
     callbackStatus, enquiryStatus,
   } = resolvePostCallOutcome({
