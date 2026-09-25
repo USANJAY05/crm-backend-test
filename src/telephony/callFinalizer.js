@@ -301,7 +301,7 @@ async function finalizeCallRecord({
     .reduce((sum, l) => sum + l.text.trim().split(/\s+/).filter(Boolean).length, 0);
   const callAnswered = !isMachineDetected && callerWordCount > 0;
 
-  const { leadId, resolvedLeadName } = await matchContact(orgId, callId, callerNumber, direction, extractedCallerName);
+  let { leadId, resolvedLeadName } = await matchContact(orgId, callId, callerNumber, direction, extractedCallerName);
 
   // Advance contact/campaign -> lead the moment a call to this contact is
   // actually answered and engaged with — the second automatic half of the
@@ -428,6 +428,60 @@ async function finalizeCallRecord({
         } catch (err) {
           log.error(`❌ [${provider}] Post-call enquiry save failed:`, err.message);
         }
+  }
+
+  // A genuinely positive, fully successful conversation becomes a Lead.
+  // This is intentionally evaluated only after the post-call Scheduling &
+  // Enquiry Agent has finished: a busy callback or unresolved enquiry is not
+  // treated as a fully-qualified lead yet.
+  const positiveLeadCandidate =
+    sentiment === "Positive" &&
+    callAnswered &&
+    !enquiryRequested &&
+    !callbackTimeToStore;
+
+  if (positiveLeadCandidate) {
+    try {
+      if (leadId) {
+        const current = await db.getLeadById(orgId, leadId).catch(() => null);
+        if (current && (!current.pipelineStage ||
+          current.pipelineStage === "contact" ||
+          current.pipelineStage === "campaign" ||
+          current.pipelineStage === "lead")) {
+          const updated = await db.patch("leads", orgId, leadId, {
+            pipelineStage: "lead",
+            status: current.status || "New",
+          });
+          resolvedLeadName = updated?.name || resolvedLeadName;
+          log.info(`🎯 [${provider}] Positive call promoted existing contact ${leadId} to Leads`);
+        }
+      } else if (callerNumber) {
+        // Positive calls from a brand-new number should also appear in the
+        // Leads section. Use the phone as the dedupe key before creating.
+        const existing = await db.findLeadByPhone(orgId, callerNumber);
+        if (existing) {
+          leadId = existing.id;
+          resolvedLeadName = existing.name || resolvedLeadName;
+          await db.patch("leads", orgId, leadId, { pipelineStage: "lead" }).catch(() => {});
+        } else {
+          const created = await db.create("leads", orgId, {
+            name: outcomeCallerName || extractedCallerName || resolvedLeadName || "Unknown Caller",
+            phone: callerNumber,
+            source: "voice_ai",
+            status: "New",
+            pipelineStage: "lead",
+            createdAt: new Date().toISOString(),
+            updatedAt: new Date().toISOString(),
+          });
+          leadId = created.id;
+          resolvedLeadName = created.name || resolvedLeadName;
+          log.info(`🎯 [${provider}] Positive call created new Lead ${leadId} for ${callerNumber}`);
+        }
+      }
+    } catch (err) {
+      // Lead promotion must never make an otherwise completed call fail.
+      log.error(`❌ [${provider}] Positive-call lead promotion failed:`, err.message);
+    }
   }
 
   // This used to be fire-and-forget (db.create(...).then().catch(), never
