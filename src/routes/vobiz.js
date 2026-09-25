@@ -249,7 +249,7 @@ router.post("/call", requireAuth, async (req, res) => {
     if (taskId && !effectiveRetryPolicy) {
       const tasks = await db.list("dialertasks", req.orgId);
       const task = tasks.find((t) => t.id === taskId);
-      effectiveRetryPolicy = task?.callResults?.__retryConfig || null;
+      effectiveRetryPolicy = task?.retryConfig || null;
     }
     const result = await triggerVobizOutboundCall(req.orgId, phoneNumber, {
       questions, from, language, assignedContact, baseUrl, starhealthEnabled: !!starhealthEnabled, agentId, taskId, leadId,
