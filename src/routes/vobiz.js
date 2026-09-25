@@ -232,7 +232,7 @@ router.post("/machine-detection", requireVobizWebhook, async (req, res) => {
 
 // Initiate an outbound Vobiz call.
 router.post("/call", requireAuth, async (req, res) => {
-  const { phoneNumber, questions, from, language, assignedContact, starhealthEnabled, agentId, taskId, leadId } = req.body;
+  const { phoneNumber, questions, from, language, assignedContact, starhealthEnabled, agentId, taskId, leadId, retryPolicy } = req.body;
   if (!phoneNumber) return res.status(400).json({ error: "Missing phoneNumber in request body" });
 
   let baseUrl;
@@ -245,8 +245,15 @@ router.post("/call", requireAuth, async (req, res) => {
 
   try {
     const { triggerVobizOutboundCall } = require("../telephony/vobizProxy");
+    let effectiveRetryPolicy = retryPolicy || null;
+    if (taskId && !effectiveRetryPolicy) {
+      const tasks = await db.list("dialertasks", req.orgId);
+      const task = tasks.find((t) => t.id === taskId);
+      effectiveRetryPolicy = task?.callResults?.__retryConfig || null;
+    }
     const result = await triggerVobizOutboundCall(req.orgId, phoneNumber, {
-      questions, from, language, assignedContact, baseUrl, starhealthEnabled: !!starhealthEnabled, agentId, taskId, leadId
+      questions, from, language, assignedContact, baseUrl, starhealthEnabled: !!starhealthEnabled, agentId, taskId, leadId,
+      retryPolicy: effectiveRetryPolicy,
     });
     res.json(result);
   } catch (err) {
