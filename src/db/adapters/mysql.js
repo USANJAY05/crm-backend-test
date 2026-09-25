@@ -257,7 +257,11 @@ const TABLES = {
       // fall back to a slugified guess (or the raw question) the next —
       // GET /api/calls/:id/lead-responses needs this to re-resolve
       // names/types from the workflow's CURRENT variables.
-      workflow_id: "text"
+      workflow_id: "text",
+      // Campaign-level retry policy for unanswered calls. Stored directly
+      // on the task so server-side auto-dial and retry workers remain
+      // independent of the browser.
+      retry_config: "json"
     }
   },
   inbound_call_logs: {
