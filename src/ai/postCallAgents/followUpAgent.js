@@ -118,7 +118,7 @@ async function extractFollowUp(
     .replace("{sentiment}", sentiment == null ? "null" : String(sentiment))
     .replace("{summary}", summary || "(No summary available.)")
     .replace("{transcript}", transcript)
-    + `\n\nMANDATORY SCHEDULING POLICY (overrides legacy wording):\n- Only schedule a callback when the caller explicitly wants a callback AND gives a usable time. Never invent a time and never default to two hours.\n- Relative time must be interpreted from the CURRENT CALLER LOCAL TIME: "5 minutes later", "5 mins later", "in 5 minutes", "in 1 hour" -> return the exact relative minutes; application code computes the actual UTC schedule.\n- Clock times must be returned in strict local format YYYY-MM-DDTHH:mm:ss with no timezone suffix. If the caller says "2 PM" and it is already after 2 PM in the caller timezone, schedule the NEXT DAY at 14:00.\n- "later", "sometime", or "whenever" without a usable time means no callback.\n- HARD SEPARATION: No Answer, no-response, unanswered ringing, silence, wrong-number, and answering-machine calls are NOT callback requests. They must return callbackRequested=false, callbackTimeMentioned=false, callbackRelativeMinutes=null, and callbackLocalDateTime=null. The retry engine handles No Answer separately.
+    + `\n\nMANDATORY SCHEDULING POLICY (overrides legacy wording):\n- A callback schedule is valid ONLY when the caller explicitly wants a callback AND gives a usable time. Callback time is mandatory. Never invent a time, never default to a retry time, and never schedule a callback without a caller-supplied time.\n- Relative time must be interpreted from the CURRENT CALLER LOCAL TIME: "5 minutes later", "5 mins later", "in 5 minutes", "in 1 hour" -> return the exact relative minutes; application code computes the actual UTC schedule.\n- Clock times must be returned in strict local format YYYY-MM-DDTHH:mm:ss with no timezone suffix. If the caller says "2 PM" and it is already after 2 PM in the caller timezone, schedule the NEXT DAY at 14:00.\n- "later", "sometime", "whenever", or "I'm busy" without a usable time means callback intent was expressed but NO CALLBACK MAY BE SCHEDULED until a usable time is supplied.\n- HARD SEPARATION: No Answer, no-response, unanswered ringing, silence, wrong-number, and answering-machine calls are NOT callback requests. They must return callbackRequested=false, callbackTimeMentioned=false, callbackRelativeMinutes=null, and callbackLocalDateTime=null. The retry engine handles No Answer separately.
 - A caller who actually answered and says "I'm busy" is still not a callback until they explicitly request one and provide a usable time.\n- Enquiry means only a meaningful caller question/request that the live agent genuinely could not answer or resolve. If the agent answered it, no enquiry.\n- A valid callback and a valid unresolved enquiry may both exist on the same answered call.\n- Sentiment ${sentiment == null ? "null" : sentiment} is context only; do not turn busy into Negative.\n\nCURRENT CALLER LOCAL TIME: ${nowInTimezone(timeZone)}\nCURRENT SENTIMENT: ${sentiment == null ? "null" : sentiment}\nCURRENT SUMMARY: ${summary || "(none)"}`;
 
   const result = await generateStructured({
@@ -131,57 +131,45 @@ async function extractFollowUp(
   });
   if (!result) return { ...DEFAULT_FOLLOW_UP };
 
-  // Application-level guard: an automatic callback is valid only when the
-  // caller explicitly supplied a usable time. The model is never allowed
-  // to turn "call me later" into the old default two-hour callback.
+  // Strict callback rule: BOTH caller intent and a caller-supplied usable
+  // time are mandatory. No application fallback time is allowed.
   let callbackTime = null;
-  let callbackRequested = !!result.callbackRequested && !!result.callbackTimeMentioned;
+  let callbackRequested = false;
 
-  if (callbackRequested) {
+  const signals = deriveTranscriptSignals(transcript);
+  const { explicitCallback, busyRequest, callerSuppliedTime, callerSpoke } = signals;
+  const callbackIntent = explicitCallback || busyRequest;
+
+  if (callbackIntent && callAnswered && callerSpoke && callerSuppliedTime) {
     if (typeof result.callbackRelativeMinutes === "number" && result.callbackRelativeMinutes > 0) {
+      // Relative time is calculated from the current instant. Because the
+      // requested interval is timezone-independent, this is safe across
+      // caller/server timezones.
       callbackTime = new Date(Date.now() + result.callbackRelativeMinutes * 60000).toISOString();
     } else if (result.callbackLocalDateTime) {
-      const resolved = zonedTimeToUtc(result.callbackLocalDateTime, timeZone);
-      if (resolved && resolved.getTime() > Date.now()) callbackTime = resolved.toISOString();
+      // Specific clock times are always resolved as caller-local wall-clock
+      // time. Past "2 PM" values roll to the next day; invalid/past values
+      // are rejected instead of being silently scheduled.
+      const resolved = resolveSpecificCallbackTime(
+        result.callbackLocalDateTime,
+        timeZone,
+        signals.callerText
+      );
+      if (resolved) callbackTime = resolved.toISOString();
     }
-    if (!callbackTime) callbackRequested = false;
+
+    callbackRequested = !!callbackTime;
   }
 
-  // Deterministic safety net: if the Caller explicitly asked to be called
-  // back, or said they are busy/unavailable and wants the conversation later,
-  // never let a weak model classification turn the answered call into
-  // "No Answer". If no caller time was supplied, use the configured callback
-  // retry policy time rather than inventing a clock time.
-  const signals = deriveTranscriptSignals(transcript);
-  const { callerText, explicitCallback, busyRequest, callerSuppliedTime, callerSpoke } = signals;
-
-  if ((explicitCallback || busyRequest) && callAnswered && callerSpoke) {
-    callbackRequested = true;
-
-    // Never trust a model-generated time unless the CALLER actually used
-    // a time expression. This prevents the model from taking a time from an
-    // Agent sentence or inventing one when the caller only said "busy".
-    if (!callerSuppliedTime) {
-      const policyFields = db.computeRetryFields(1, db.DEFAULT_RETRY_POLICY, callerPhone);
-      callbackTime = policyFields.nextRetryAt || null;
-    }
-
-    // callbackTimeMentioned describes only what the Caller actually said.
-    // The configured fallback time is an application schedule, not a caller
-    // supplied time.
-    if (!callerSuppliedTime) {
-      result.callbackTimeMentioned = false;
-      result.callbackRelativeMinutes = null;
-      result.callbackLocalDateTime = null;
-    }
-  }
-
-  // If the caller neither requested a callback nor said they were busy/
-  // unavailable, do not create a callback merely because the model guessed
-  // one. A callback still requires explicit caller intent.
-  if (!explicitCallback && !busyRequest && !callbackTime) {
+  // Never accept a model-generated callback time when the caller did not
+  // actually provide a usable time. This also prevents Agent sentences,
+  // summaries, sentiment, or legacy retry policy from creating callbacks.
+  if (!callbackIntent || !callerSpoke || !callerSuppliedTime || !callbackTime) {
     callbackRequested = false;
     callbackTime = null;
+    result.callbackTimeMentioned = false;
+    result.callbackRelativeMinutes = null;
+    result.callbackLocalDateTime = null;
   }
 
   return {
