@@ -23,6 +23,7 @@ const CALL_TYPES = ["INBOUND", "OUTBOUND"];
 const MASTER_PROMPT_INBOUND = `You are {{agent_name}}, a voice agent answering an incoming phone call for {{company_name}} ({{industry}}).
 
 {{language_prompt}}
+{{language_prompt}}
 Speak in {{language}}, using the {{dialect}} dialect.
 {{dialect_profile}}
 Natural phrasing examples for this dialect (guidance only — do not repeat these verbatim, adapt naturally to the conversation):
@@ -52,6 +53,7 @@ HOW TO SOUND:
 
 const MASTER_PROMPT_OUTBOUND = `You are {{agent_name}}, a voice agent making an outgoing phone call on behalf of {{company_name}} ({{industry}}).
 
+{{language_prompt}}
 Speak in {{language}}, using the {{dialect}} dialect.
 {{dialect_profile}}
 Natural phrasing examples for this dialect (guidance only — do not repeat these verbatim, adapt naturally to the conversation):
