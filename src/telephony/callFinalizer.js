@@ -21,10 +21,10 @@
 const db = require("../db/repository");
 const objectsEngine = require("../crm/objectsEngine");
 const postCallAgents = require("../ai/postCallAgents");
+const { normalizeQuestions, validateWorkflowAnswers } = require("../ai/postCallAgents/workflowAnswersAgent");
 const storage = require("../storage");
 const geminiUsageTracker = require("../ai/geminiUsageTracker");
 const { getLogger } = require("../observability/logger");
-const { deriveTranscriptSignals } = require("../ai/postCallAgents/decisionEngine");
 const log = getLogger("telephony.callFinalizer");
 
 // Uploads a call's recording and returns its public URL (or null on failure/
@@ -349,23 +349,77 @@ async function finalizeCallRecord({
   // Scheduling & Enquiry Agent can see both summary and sentiment. Only that
   // agent is allowed to decide callback/enquiry actions.
   let callAnswers = [];
+  let workflowQuestions = null;
+  let workflowValidation = { complete: true, missingQuestions: [], requiredQuestions: [] };
   try { callAnswers = await db.getResponsesByCallId(orgId, callId); } catch {}
-  if (!callAnswers.length && transcriptLines.length > 0) {
-    const questions = getWorkflowQuestions();
-    if (questions?.length) {
-      try {
-        callAnswers = await postCallAgents.extractWorkflowAnswers(fullTranscript, questions, orgId, accumulateUsage);
-      } catch (err) {
-        log.error(`❌ [${provider}] workflow answer extraction failed; continuing call finalization:`, err.message);
-        callAnswers = [];
+  workflowQuestions = getWorkflowQuestions();
+
+  // Always run transcript extraction when a workflow is assigned. Live
+  // function-calling may have saved only SOME answers; extracting only when
+  // callAnswers is empty would permanently leave the remaining mandatory
+  // questions missing and make the strict lead gate unreliable.
+  if (workflowQuestions?.length && transcriptLines.length > 0) {
+    let extractedAnswers = [];
+    try {
+      extractedAnswers = await postCallAgents.extractWorkflowAnswers(
+        fullTranscript,
+        workflowQuestions,
+        orgId,
+        accumulateUsage
+      );
+    } catch (err) {
+      log.error(`❌ [${provider}] workflow answer extraction failed; continuing call finalization:`, err.message);
+      extractedAnswers = [];
+    }
+
+    const existingByQuestion = new Map(
+      (callAnswers || [])
+        .filter((row) => row?.question)
+        .map((row) => [String(row.question).trim().toLowerCase(), row])
+    );
+
+    // Live-saved answers are authoritative. Transcript extraction only fills
+    // questions that were not already captured by live tool-calling.
+    for (const answerRow of extractedAnswers) {
+      if (!answerRow?.question) continue;
+      const key = String(answerRow.question).trim().toLowerCase();
+      const existing = existingByQuestion.get(key);
+      const existingAnswer = existing?.answer == null ? "" : String(existing.answer).trim();
+
+      if (!existing || !existingAnswer) {
+        if (!existing) {
+          callAnswers.push(answerRow);
+        } else {
+          existing.answer = answerRow.answer || "";
+          existing.label = existing.label || answerRow.label || answerRow.question;
+        }
+
+        if (answerRow.answer != null && String(answerRow.answer).trim()) {
+          db.create("leadresponses", orgId, {
+            callId,
+            question: answerRow.question,
+            answer: answerRow.answer,
+            label: answerRow.label || answerRow.question,
+            createdAt: new Date().toISOString(),
+          }).catch(() => {});
+        }
       }
-      for (const { label, question, answer } of callAnswers) {
-        if (!question) continue;
-        db.create("leadresponses", orgId, {
-          callId, question, answer, label: label || question,
-          createdAt: new Date().toISOString(),
-        }).catch(() => {});
-      }
+    }
+  }
+
+  // Strict workflow gate: every question is mandatory unless the workflow
+  // explicitly marks it optional (or required=false). This runs after both
+  // saved live-tool answers and post-call transcript extraction, so lead
+  // creation can never bypass the rule.
+  if (!workflowQuestions) {
+    workflowQuestions = getWorkflowQuestions();
+  }
+  if (workflowQuestions?.length) {
+    workflowValidation = validateWorkflowAnswers(workflowQuestions, callAnswers);
+    if (!workflowValidation.complete) {
+      log.warn(
+        `⚠️ [${provider}] Workflow incomplete for call ${callId}; lead creation/promotion blocked. Missing: ${workflowValidation.missingQuestions.map((q) => q.label || q.question).join(", ")}`
+      );
     }
   }
 
@@ -427,22 +481,6 @@ async function finalizeCallRecord({
     callerName: null,
   };
 
-  // Deterministic callback safety net: even if the Scheduling & Enquiry
-  // Agent times out or contradicts the transcript, explicit callback/busy
-  // intent from the Caller wins. Without a usable caller time, the normal
-  // retry/callback policy supplies the schedule; no model-generated time is
-  // accepted in this fallback path.
-  const transcriptSignals = deriveTranscriptSignals(fullTranscript);
-  if (callAnswered && (transcriptSignals.explicitCallback || transcriptSignals.busyRequest)) {
-    scheduling.callbackRequested = true;
-    if (!scheduling.callbackTime) {
-      scheduling.callbackTime = db.computeRetryFields(1, db.DEFAULT_RETRY_POLICY, callerNumber).nextRetryAt || null;
-    }
-    if (!transcriptSignals.callerSuppliedTime) {
-      scheduling.callbackTimeMentioned = false;
-    }
-  }
-
   const {
     finalStatus, callbackRequested, enquiryRequested, callbackTimeToStore, callbackReasonToStore,
     enquirySummary, callerName: outcomeCallerName, conversationOutcome: initialConversationOutcome,
@@ -493,7 +531,14 @@ async function finalizeCallRecord({
     sentiment === "Positive" &&
     callAnswered &&
     !enquiryRequested &&
-    !callbackTimeToStore;
+    !callbackTimeToStore &&
+    workflowValidation.complete;
+
+  if (!workflowValidation.complete) {
+    log.info(
+      `🚫 [${provider}] Lead creation/promotion skipped for call ${callId}: mandatory workflow data is incomplete.`
+    );
+  }
 
   if (positiveLeadCandidate) {
     try {
