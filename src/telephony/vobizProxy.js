@@ -2232,7 +2232,7 @@ async function processPostCallData({
   const callerWordCount = mergedForSentiment
     .filter((line) => line.role === "user")
     .reduce((sum, line) => sum + line.text.trim().split(/\s+/).filter(Boolean).length, 0);
-  const callAnswered = !isMachineDetected && callerWordCount >= 4;
+  const callAnswered = !isMachineDetected && callerWordCount > 0;
 
   const fullTranscript = callFinalizer.buildFullTranscript(mergedForSentiment);
   let sentimentInputTokens = 0;
