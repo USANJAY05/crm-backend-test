@@ -352,21 +352,57 @@ async function finalizeCallRecord({
   let workflowQuestions = null;
   let workflowValidation = { complete: true, missingQuestions: [], requiredQuestions: [] };
   try { callAnswers = await db.getResponsesByCallId(orgId, callId); } catch {}
-  if (!callAnswers.length && transcriptLines.length > 0) {
-    workflowQuestions = getWorkflowQuestions();
-    if (workflowQuestions?.length) {
-      try {
-        callAnswers = await postCallAgents.extractWorkflowAnswers(fullTranscript, workflowQuestions, orgId, accumulateUsage);
-      } catch (err) {
-        log.error(`❌ [${provider}] workflow answer extraction failed; continuing call finalization:`, err.message);
-        callAnswers = [];
-      }
-      for (const { label, question, answer } of callAnswers) {
-        if (!question) continue;
-        db.create("leadresponses", orgId, {
-          callId, question, answer, label: label || question,
-          createdAt: new Date().toISOString(),
-        }).catch(() => {});
+  workflowQuestions = getWorkflowQuestions();
+
+  // Always run transcript extraction when a workflow is assigned. Live
+  // function-calling may have saved only SOME answers; extracting only when
+  // callAnswers is empty would permanently leave the remaining mandatory
+  // questions missing and make the strict lead gate unreliable.
+  if (workflowQuestions?.length && transcriptLines.length > 0) {
+    let extractedAnswers = [];
+    try {
+      extractedAnswers = await postCallAgents.extractWorkflowAnswers(
+        fullTranscript,
+        workflowQuestions,
+        orgId,
+        accumulateUsage
+      );
+    } catch (err) {
+      log.error(`❌ [${provider}] workflow answer extraction failed; continuing call finalization:`, err.message);
+      extractedAnswers = [];
+    }
+
+    const existingByQuestion = new Map(
+      (callAnswers || [])
+        .filter((row) => row?.question)
+        .map((row) => [String(row.question).trim().toLowerCase(), row])
+    );
+
+    // Live-saved answers are authoritative. Transcript extraction only fills
+    // questions that were not already captured by live tool-calling.
+    for (const answerRow of extractedAnswers) {
+      if (!answerRow?.question) continue;
+      const key = String(answerRow.question).trim().toLowerCase();
+      const existing = existingByQuestion.get(key);
+      const existingAnswer = existing?.answer == null ? "" : String(existing.answer).trim();
+
+      if (!existing || !existingAnswer) {
+        if (!existing) {
+          callAnswers.push(answerRow);
+        } else {
+          existing.answer = answerRow.answer || "";
+          existing.label = existing.label || answerRow.label || answerRow.question;
+        }
+
+        if (answerRow.answer != null && String(answerRow.answer).trim()) {
+          db.create("leadresponses", orgId, {
+            callId,
+            question: answerRow.question,
+            answer: answerRow.answer,
+            label: answerRow.label || answerRow.question,
+            createdAt: new Date().toISOString(),
+          }).catch(() => {});
+        }
       }
     }
   }
