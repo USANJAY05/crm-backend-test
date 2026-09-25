@@ -27,6 +27,7 @@ const { getQueue } = require("../queue");
 const { createCallFinalizerRegistry } = require("./callFinalizerRegistry");
 const { createSilenceWatchdog, isSilentPcm16 } = require("./silenceWatchdog");
 const geminiUsageTracker = require("../ai/geminiUsageTracker");
+const rechargeBilling = require("../crm/rechargeBilling");
 
 // Post-call pipeline (sentiment/summary/Q&A extraction/DB write) runs
 // through the shared job queue instead of a bare fire-and-forget async

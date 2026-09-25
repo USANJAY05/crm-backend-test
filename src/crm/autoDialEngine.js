@@ -348,6 +348,7 @@ async function processTask(task) {
       taskName: task.name, provider, baseUrl, questions: task.questions, language: task.language,
       from, agentId, starhealthEnabled: !!task.starhealthEnabled,
       retryPolicy: task.retryPolicy || task.callResults?.__retryConfig || null,
+      autoDialRunId: task.autoDialRunId || null,
     });
   } catch (err) {
     log.error(`❌ [autoDialEngine] Failed to prepare dial for lead ${pendingLeadId} on task ${taskId} (org ${orgId}):`, err.message);
@@ -367,7 +368,7 @@ async function processTask(task) {
 // leave the task's currentLeadId claimed until the queue exhausts its own
 // retries, stalling the whole task for no benefit.
 async function handlePlaceDialJob(data) {
-  const { orgId, taskId, leadId, leadName, leadPhone, taskName, provider, baseUrl, questions, language, from, agentId, starhealthEnabled, retryPolicy } = data;
+  const { orgId, taskId, leadId, leadName, leadPhone, taskName, provider, baseUrl, questions, language, from, agentId, starhealthEnabled, retryPolicy, autoDialRunId } = data;
   try {
     // The job sat in the queue briefly between being enqueued and actually
     // running — re-check the task wasn't stopped in that window (POST
@@ -377,7 +378,7 @@ async function handlePlaceDialJob(data) {
     // calls that already have a providerCallSid).
     const tasksBeforeDial = await db.list("dialertasks", orgId);
     const taskBeforeDial = tasksBeforeDial.find((t) => t.id === taskId);
-    if (!taskBeforeDial || !taskBeforeDial.autoDialEnabled) {
+    if (!taskBeforeDial || !taskBeforeDial.autoDialEnabled || (autoDialRunId && taskBeforeDial.autoDialRunId !== autoDialRunId)) {
       log.info(`🤖 [autoDialEngine] Skipping queued dial for lead ${leadId} on task ${taskId} (org ${orgId}) — task was stopped before the job ran.`);
       await db.patch("dialertasks", orgId, taskId, { currentLeadId: null, currentCallStartedAt: null }).catch(() => {});
       return;
@@ -394,7 +395,19 @@ async function handlePlaceDialJob(data) {
     // auto-dial loop to continue after the campaign is actually finished.
     const tasksAfterDial = await db.list("dialertasks", orgId);
     const taskAfterDial = tasksAfterDial.find((t) => t.id === taskId);
-    if (!taskAfterDial || !taskAfterDial.autoDialEnabled || taskAfterDial.currentLeadId !== leadId) {
+    if (!taskAfterDial || !taskAfterDial.autoDialEnabled || taskAfterDial.currentLeadId !== leadId ||
+        (autoDialRunId && taskAfterDial.autoDialRunId !== autoDialRunId)) {
+      // The stop request can race with the provider placement request. In that
+      // window there is no provider SID yet for forceHangupCurrentCall() to
+      // use, so if Vobiz did place the call after Stop, hang it up here.
+      if (result?.callSid) {
+        try {
+          await telephony.hangupCall(provider, result.callSid, orgId);
+          log.info(`🛑 [autoDialEngine] Hung up call ${result.callSid} because task ${taskId} was stopped during placement.`);
+        } catch (hangupErr) {
+          log.error(`❌ [autoDialEngine] Failed to cancel call ${result.callSid} after task ${taskId} was stopped:`, hangupErr.message);
+        }
+      }
       log.info(`🤖 [autoDialEngine] Call for lead ${leadId} completed/stopped before placement state could be committed; not resurrecting task ${taskId}.`);
       return;
     }
