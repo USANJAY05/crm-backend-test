@@ -8,7 +8,7 @@ const { z } = require("zod");
 const { getEffectivePrompt } = require("../systemAgents");
 const { generateStructured, formatWorkflowAnswers } = require("./shared");
 const { getCallerTimezone } = require("../../lib/callerTimezone");
-const { nowInTimezone, zonedTimeToUtc } = require("../../lib/timezoneConvert");
+const { nowInTimezone } = require("../../lib/timezoneConvert");
 
 const SummarySchema = z.object({
   summary: z.string().min(1),
