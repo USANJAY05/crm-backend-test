@@ -120,7 +120,7 @@ router.post("/incoming", requireVobizWebhook, async (req, res) => {
           direction: "outbound",
           createdAt: new Date().toISOString(),
           providerCallSid: CallUUID,
-          ...db.computeRetryFields(attemptNumber),
+          ...db.computeRetryFields(attemptNumber, retryContext?.retryPolicy || db.DEFAULT_RETRY_POLICY, calleeNumber),
           retryContext
         }).then((savedLog) => {
           global.broadcastLog(`📞 Vobiz call ended without a media session ever registering (${status}): ${calleeNumber}`, {
