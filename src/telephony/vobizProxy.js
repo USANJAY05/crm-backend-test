@@ -2240,50 +2240,35 @@ async function processPostCallData({
 }) {
   callerNumber = normalizePhone(callerNumber);
 
-  let sentiment = "Neutral";
-  // callFinalizer.finalizeCallRecord() merges fragments and builds the full
-  // transcript itself further down — this local copy uses the same merge
-  // helper, needed here only because sentiment/follow-up run before that call.
-  const fullTranscript = callFinalizer.buildFullTranscript(callFinalizer.mergeTranscriptLines(transcriptLines));
+  let sentiment = null;
+  // Sentiment is computed once for Vobiz and passed into the shared finalizer.
+  // Busy/no-real-conversation calls intentionally remain null.
+  const mergedForSentiment = callFinalizer.mergeTranscriptLines(transcriptLines);
+  const callerWordCount = mergedForSentiment
+    .filter((line) => line.role === "user")
+    .reduce((sum, line) => sum + line.text.trim().split(/\s+/).filter(Boolean).length, 0);
+  const callAnswered = !isMachineDetected && callerWordCount >= 4;
 
+  const fullTranscript = callFinalizer.buildFullTranscript(mergedForSentiment);
   let sentimentInputTokens = 0;
   let sentimentOutputTokens = 0;
 
-  // Sentiment analysis — pass along whatever workflow answers the AI's own
-  // live save_question_response tool already saved during the call (a
-  // cheap DB read, not another LLM call) so sentiment is judged against
-  // how much of the questionnaire the caller actually engaged with, not
-  // the transcript in isolation.
-  if (transcriptLines.length > 0) {
+  if (callAnswered) {
     let liveAnswers = [];
     try { liveAnswers = await db.getResponsesByCallId(orgId, callId); } catch {}
     const result = await postCallAgents.analyzeSentiment(fullTranscript, orgId, liveAnswers);
     sentiment = result.sentiment;
     sentimentInputTokens = result.inputTokens;
     sentimentOutputTokens = result.outputTokens;
-    log.info(`📊 Vobiz Sentiment: ${sentiment}`);
+    log.info(`📊 Vobiz Sentiment: ${sentiment ?? "null"}`);
   }
 
-  // Follow-up safety net — the AI has an explicit instruction to call
-  // save_enquiry the moment it promises a callback ("I'll forward this",
-  // "someone will contact you"), but live-audio function calling isn't
-  // reliable: confirmed live, a call where the AI said that exact line
-  // never invoked the tool, so nothing got saved and no error was ever
-  // logged (an uncalled tool leaves no trace to catch). Independently of
-  // whether the tool fired, re-check the finished transcript here and
-  // save the enquiry if one is missing — this doesn't depend on the
-  // live model's tool-calling behavior at all.
+  // Callback/enquiry extraction is intentionally NOT run here. The shared
+  // call finalizer runs the Scheduling & Enquiry Agent after the Summary
+  // Agent and with sentiment available, so there is exactly one action
+  // decision-maker and no duplicate callback/enquiry generation.
   let extractedCallerName = null;
   let followUp = null;
-  if (transcriptLines.length > 0 && orgId) {
-    followUp = await postCallAgents.extractFollowUp(fullTranscript, orgId, callerNumber, ({ inputTokens, outputTokens }) => {
-      sentimentInputTokens += inputTokens || 0;
-      sentimentOutputTokens += outputTokens || 0;
-    });
-    if (followUp.callerName) extractedCallerName = followUp.callerName;
-    // Enquiry persistence lives in callFinalizer.resolvePostCallOutcome so a
-    // busy/callback from either post-call agent cannot also create an enquiry.
-  }
 
   // Combined token calculation for BOTH models
   let totalInputTokens = liveInputTokens + sentimentInputTokens;
