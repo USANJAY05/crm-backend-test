@@ -1,17 +1,9 @@
 // src/ai/postCallAgents/sentimentAgent.js
 // ============================================================
 // Post-call sentiment classification — Positive/Neutral/Negative/null.
-//
-// "Unknown" covers the "not enough of a real conversation to judge" case
-// (the caller was busy and asked for a callback) — using the schema's
-// existing Unknown value rather than a literal null, since sentiment is a
-// typed enum ('Positive' | 'Neutral' | 'Negative' | 'Unknown') across the
-// DB column, CallLog/Lead types, Reports' sentiment breakdown, and the
-// sentiment chip components — introducing null would need every one of
-// those to add null-handling for no real benefit over the sentinel value
-// they already all support.
-// ============================================================
-
+// null is intentional for busy/callback-only calls or calls with insufficient
+// genuine caller interaction. The database sentiment field is nullable text,
+// so no sentinel such as "Unknown" is required.
 const { z } = require("zod");
 const { getEffectivePrompt } = require("../systemAgents");
 const { generateStructured, log, formatWorkflowAnswers } = require("./shared");
