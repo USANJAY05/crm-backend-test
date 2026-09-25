@@ -179,6 +179,37 @@ router.get("/audit-log", async (req, res) => {
   }
 });
 
+router.get("/billing/call-balance/defaults", async (req, res) => {
+  try { res.json(await platformAdmin.getCallBalanceDefaults()); }
+  catch (err) { handleError(err, res); }
+});
+
+router.put("/billing/call-balance/defaults/:industry", async (req, res) => {
+  try {
+    const actor = { userId: req.userId, userEmail: req.userEmail };
+    res.json(await platformAdmin.setCallBalanceDefault(actor, req.params.industry, req.body || {}));
+  } catch (err) { handleError(err, res); }
+});
+
+router.get("/organizations/:id/billing/call-balance", async (req, res) => {
+  try { res.json(await platformAdmin.getOrganizationCallBalance(req.params.id)); }
+  catch (err) { handleError(err, res); }
+});
+
+router.put("/organizations/:id/billing/call-balance", async (req, res) => {
+  try {
+    const actor = { userId: req.userId, userEmail: req.userEmail };
+    res.json(await platformAdmin.setOrganizationCallBalance(actor, req.params.id, req.body || {}));
+  } catch (err) { handleError(err, res); }
+});
+
+router.delete("/organizations/:id/billing/call-balance", async (req, res) => {
+  try {
+    const actor = { userId: req.userId, userEmail: req.userEmail };
+    res.json(await platformAdmin.clearOrganizationCallBalance(actor, req.params.id));
+  } catch (err) { handleError(err, res); }
+});
+
 router.get("/pricing", async (req, res) => {
   try {
     res.json(await platformAdmin.getPricing());
