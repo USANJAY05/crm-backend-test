@@ -119,7 +119,10 @@ const ENTITIES = {
       callAnswered: "call_answered",
       // One-line reason for a "Callback Scheduled" call — see
       // callFinalizer.js's followUp.querySummary.
-      callbackReason: "callback_reason"
+      callbackReason: "callback_reason",
+      conversationOutcome: "conversation_outcome",
+      callbackStatus: "callback_status",
+      enquiryStatus: "enquiry_status"
     }
   },
   dialertasks: {
