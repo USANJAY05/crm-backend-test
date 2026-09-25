@@ -265,7 +265,10 @@ const TABLES = {
       // Campaign-level retry policy for unanswered calls. Stored directly
       // on the task so server-side auto-dial and retry workers remain
       // independent of the browser.
-      retry_config: "json"
+      retry_config: "json",
+      // Immutable metadata identifying the workflow run that created this
+      // dialing task. The same workflow can be launched many times.
+      workflow_run_metadata: "json"
     }
   },
   inbound_call_logs: {
