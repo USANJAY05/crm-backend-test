@@ -123,6 +123,7 @@ async function processDueRetries() {
         baseUrl, attemptNumber: nextAttempt,
         questions: retryContext.questions, from: retryContext.from, language: retryContext.language,
         assignedContact: retryContext.assignedContact,
+        retryPolicy: retryContext.retryPolicy || null,
         // Forward taskId/leadId (present when the original call — or an
         // earlier hop of this same retry chain — was placed for a dialer
         // task) so callFinalizer.js can keep patching that task's
@@ -150,11 +151,11 @@ async function processDueRetries() {
 // tracks toward MAX_RETRY_ATTEMPTS; a queue-level rethrow-and-retry would
 // just duplicate that with a different budget/backoff).
 async function handlePlaceRedialJob(data) {
-  const { orgId, rowId, dialTarget, leadName, baseUrl, attemptNumber, questions, from, language, assignedContact, taskId, leadId, provider = "vobiz" } = data;
+  const { orgId, rowId, dialTarget, leadName, baseUrl, attemptNumber, questions, from, language, assignedContact, retryPolicy, taskId, leadId, provider = "vobiz" } = data;
   try {
     const telephony = require("../telephony/registry");
     await telephony.triggerOutboundCall(provider, orgId, dialTarget, {
-      baseUrl, attemptNumber, questions, from, language, assignedContact, taskId, leadId,
+      baseUrl, attemptNumber, questions, from, language, assignedContact, retryPolicy, taskId, leadId,
     });
     await db.patch("calllogs", orgId, rowId, { retryStatus: "retried", retryClaimedAt: null });
   } catch (err) {

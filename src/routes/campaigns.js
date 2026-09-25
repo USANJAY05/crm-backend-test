@@ -111,7 +111,10 @@ router.get("/dialer-tasks", requireAuth, async (req, res) => {
       );
       return { ...task, callResults: Object.fromEntries(entries) };
     }));
-    res.json(resolved);
+    res.json(resolved.map((task) => ({
+      ...task,
+      retryConfig: db.normalizeRetryPolicy(task.retryConfig || db.DEFAULT_RETRY_POLICY),
+    })));
   } catch (err) { res.status(500).json({ error: safeErrorMessage(err) }); }
 });
 
@@ -129,10 +132,14 @@ router.post("/dialer-tasks/sync", requireAuth, async (req, res) => {
     ];
     const merged = incoming.map((task) => {
       const current = byId.get(task.id);
-      if (!current) return task;
       const copy = { ...task };
-      for (const field of runtimeFields) {
-        if (Object.prototype.hasOwnProperty.call(current, field)) copy[field] = current[field];
+      copy.retryConfig = db.normalizeRetryPolicy(
+        task.retryConfig || current?.retryConfig || db.DEFAULT_RETRY_POLICY
+      );
+      if (current) {
+        for (const field of runtimeFields) {
+          if (Object.prototype.hasOwnProperty.call(current, field)) copy[field] = current[field];
+        }
       }
       return copy;
     });
@@ -159,8 +166,10 @@ router.patch("/dialer-tasks/:id", requireAuth, async (req, res) => {
 // a task the backend doesn't know about yet).
 router.post("/dialer-tasks", requireAuth, async (req, res) => {
   try {
-    const created = await db.create("dialertasks", req.orgId, req.body);
-    res.status(201).json(created);
+    const body = { ...(req.body || {}) };
+    body.retryConfig = db.normalizeRetryPolicy(body.retryConfig || db.DEFAULT_RETRY_POLICY);
+    const created = await db.create("dialertasks", req.orgId, body);
+    res.status(201).json({ ...created, retryConfig: body.retryConfig });
   } catch (err) { res.status(500).json({ error: safeErrorMessage(err) }); }
 });
 

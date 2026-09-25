@@ -46,9 +46,13 @@ function resolvePostCallOutcome({
   isMachineDetected,
   attemptNumber = 1,
   retryContext,
+  callAnswered = true,
+  direction = "unknown",
+  callerNumber = null,
 }) {
   const decision = scheduling || {};
   const maxAttempts = db.MAX_RETRY_ATTEMPTS || 3;
+  const retryPolicy = retryContext?.retryPolicy || db.DEFAULT_RETRY_POLICY;
   const requestedCallback = !!decision.callbackRequested && !!decision.callbackTime;
   const callbackExhausted = requestedCallback && attemptNumber >= maxAttempts;
   const callbackRequested = requestedCallback && !callbackExhausted;
@@ -63,7 +67,13 @@ function resolvePostCallOutcome({
 
   if (isMachineDetected) {
     finalStatus = "Answering Machine";
-    retryFieldsToSave = { ...db.computeRetryFields(attemptNumber), retryContext };
+    retryFieldsToSave = { ...db.computeRetryFields(attemptNumber, retryPolicy, callerNumber), retryContext };
+  } else if (!callAnswered && direction === "outbound") {
+    // A caller who never engaged is a retryable "No Answer", never a
+    // conversational callback. The Scheduling & Enquiry Agent is skipped
+    // before this point when callAnswered=false.
+    finalStatus = "No Answer";
+    retryFieldsToSave = { ...db.computeRetryFields(attemptNumber, retryPolicy, callerNumber), retryContext };
   } else if (callbackRequested) {
     finalStatus = "Callback Scheduled";
     retryFieldsToSave = {
@@ -408,6 +418,9 @@ async function finalizeCallRecord({
     isMachineDetected,
     attemptNumber,
     retryContext,
+    callAnswered,
+    direction,
+    callerNumber,
   });
 
   if (enquiryRequested && enquirySummary) {
@@ -569,7 +582,7 @@ async function finalizeCallRecord({
       global.broadcastLog(`📼 [${provider}] Call logged: ${callerNumber} (${durationSeconds}s, ${sentiment})`, { type: "call_completed", orgId, callLog: enrichedLog, providerCallSid });
     }
     if (finalStatus === "Callback Scheduled") {
-      log.info(`📅 [${provider}] Callback scheduled for ${callerNumber} — next attempt ${retryFieldsToSave.nextRetryAt}${callbackTimeToStore ? "" : " (caller didn't give a specific time — using a default delay)"}`);
+      log.info(`📅 [${provider}] Callback scheduled for ${callerNumber} — next attempt ${retryFieldsToSave.nextRetryAt}`);
     }
   } catch (err) {
     log.error(`❌ [${provider}] call_logs insert error for call ${callId}:`, err.message);
