@@ -337,12 +337,13 @@ router.post("/organizations", async (req, res) => {
       validatedCallProvider = { provider, authId, authToken, phoneNumber };
     }
 
-    // Validate the external project before creating the CRM organization so a
-    // bad credential/project cannot leave a newly-created org partially configured.
+    // The service-account JSON is the source of truth for the Google Cloud
+    // project. Do not require a duplicate projectId from the client.
+    // validateExistingProject extracts credentials.project_id and validates
+    // that project directly.
     let validatedGcp;
     try {
       validatedGcp = await validateExistingProject({
-        projectId: gcpProject.projectId,
         credentials: gcpProject.credentials,
         location: gcpProject.location,
       });
