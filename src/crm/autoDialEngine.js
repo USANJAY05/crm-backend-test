@@ -175,6 +175,11 @@ async function processTask(task) {
           recordingUrl: finishedLog.recordingUrl || undefined,
           callId: finishedLog.id,
           callbackTime: finishedLog.callbackTime || undefined,
+          callAnswered: finishedLog.callAnswered,
+          conversationOutcome: finishedLog.conversationOutcome,
+          callbackStatus: finishedLog.callbackStatus,
+          enquiryStatus: finishedLog.enquiryStatus,
+          callbackReason: finishedLog.callbackReason,
         };
       }
       // Auto-dial is a single-call execution mode: once the current
