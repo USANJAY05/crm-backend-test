@@ -157,10 +157,29 @@ async function uploadRecording(provider, callId, wavBuffer) {
 // one-word lines.
 function mergeTranscriptLines(transcriptLines) {
   const merged = [];
-  for (const l of transcriptLines) {
+  for (const raw of (transcriptLines || [])) {
+    if (!raw) continue;
+    const role = raw.role === "user" ? "user" : "model";
+    const text = String(raw.text || "").replace(/\\s+/g, " ").trim();
+    if (!text) continue;
     const last = merged[merged.length - 1];
-    if (last && last.role === l.role) last.text += l.text;
-    else merged.push({ role: l.role, text: l.text });
+    if (last && last.role === role) {
+      const a = last.text;
+      const b = text;
+      if (a === b || a.toLowerCase() === b.toLowerCase()) continue;
+      const lowerA = a.toLowerCase();
+      const lowerB = b.toLowerCase();
+      if (lowerA.endsWith(lowerB)) continue;
+      if (lowerB.startsWith(lowerA)) { last.text = b; continue; }
+      let overlap = 0;
+      const max = Math.min(a.length, b.length);
+      for (let n = max; n >= 8; n--) {
+        if (lowerA.slice(-n) === lowerB.slice(0, n)) { overlap = n; break; }
+      }
+      last.text = overlap ? a + b.slice(overlap) : a + " " + b;
+    } else {
+      merged.push({ role, text });
+    }
   }
   return merged;
 }
