@@ -1699,21 +1699,6 @@ async function openGeminiSession(vobizWs, voiceName, systemPrompt, recordStream,
               parameters: { type: "OBJECT", properties: {} }
             }] : []),
             {
-              name: "save_enquiry",
-              description: "Save a caller's question or request that you genuinely could NOT answer or resolve yourself on this call, so a team member can follow up. Do NOT call this just because the caller said they're busy right now and asked you to call back later — that's a scheduled callback, handled automatically from what you say on the call, not a team follow-up, so leave it out of here. Call this quietly in the background as soon as you have any of the details — don't wait until the end of the call, and don't announce it as a database save.",
-              parameters: {
-                type: "OBJECT",
-                properties: {
-                  name: { type: "STRING", description: "Caller's name, if known" },
-                  phone: { type: "STRING", description: "Caller's phone number, if known" },
-                  email: { type: "STRING", description: "Caller's email, if known" },
-                  location: { type: "STRING", description: "Caller's location, if mentioned" },
-                  query_text: { type: "STRING", description: "What the caller asked or needs help with" }
-                },
-                required: ["query_text"]
-              }
-            },
-            {
               name: "save_contact_details",
               description: "Save/update this caller's name, email, or location in the contact directory the moment they tell you — quietly, in the background, don't announce it as a database save. Call it as soon as they give you their name (even before anything else is discussed), and again any time they give you an email or location you didn't already have.",
               parameters: {
