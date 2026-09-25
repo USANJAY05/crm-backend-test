@@ -68,12 +68,15 @@ async function removeIndustryDefault(industry) {
 }
 
 async function getOrganizationPolicy(orgId) {
-  const org = await require("../db/repository").getOrg(orgId);
+  const db = require("../db/repository");
+  const org = await db.getOrg(orgId);
   if (!org) throw Object.assign(new Error("Organization not found"), { statusCode: 404 });
+  const { data: row, error } = await db.supabase.from("organizations").select("settings, industry").eq("id", orgId).maybeSingle();
+  if (error) throw new Error(`[callBalancePolicy.getOrganizationPolicy] ${error.message}`);
   const defaults = await getIndustryDefaults();
-  const industry = org.industry || "lending";
+  const industry = row?.industry || org.industry || "lending";
   const base = defaults[industry] || { industry, label: industry, minimumBalanceInr: 0, reservationMinutes: 1 };
-  const override = org.settings?.billing?.callBalance;
+  const override = row?.settings?.billing?.callBalance;
   return {
     orgId,
     industry,
