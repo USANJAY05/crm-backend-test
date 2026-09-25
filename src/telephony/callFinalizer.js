@@ -24,7 +24,6 @@ const postCallAgents = require("../ai/postCallAgents");
 const storage = require("../storage");
 const geminiUsageTracker = require("../ai/geminiUsageTracker");
 const { getLogger } = require("../observability/logger");
-const { deriveTranscriptSignals } = require("../ai/postCallAgents/decisionEngine");
 const log = getLogger("telephony.callFinalizer");
 
 // Uploads a call's recording and returns its public URL (or null on failure/
@@ -426,22 +425,6 @@ async function finalizeCallRecord({
     enquirySummary: null,
     callerName: null,
   };
-
-  // Deterministic callback safety net: even if the Scheduling & Enquiry
-  // Agent times out or contradicts the transcript, explicit callback/busy
-  // intent from the Caller wins. Without a usable caller time, the normal
-  // retry/callback policy supplies the schedule; no model-generated time is
-  // accepted in this fallback path.
-  const transcriptSignals = deriveTranscriptSignals(fullTranscript);
-  if (callAnswered && (transcriptSignals.explicitCallback || transcriptSignals.busyRequest)) {
-    scheduling.callbackRequested = true;
-    if (!scheduling.callbackTime) {
-      scheduling.callbackTime = db.computeRetryFields(1, db.DEFAULT_RETRY_POLICY, callerNumber).nextRetryAt || null;
-    }
-    if (!transcriptSignals.callerSuppliedTime) {
-      scheduling.callbackTimeMentioned = false;
-    }
-  }
 
   const {
     finalStatus, callbackRequested, enquiryRequested, callbackTimeToStore, callbackReasonToStore,
