@@ -305,26 +305,35 @@ router.post("/organizations", async (req, res) => {
       return res.status(400).json({ error: "Existing Google Cloud project configuration is required." });
     }
 
-    if (!callProvider || typeof callProvider !== "object") {
-      return res.status(400).json({ error: "Call provider configuration is required." });
-    }
-    const provider = String(callProvider.provider || "vobiz").trim().toLowerCase();
-    if (provider !== "vobiz") {
-      return res.status(400).json({ error: "Unsupported call provider. Currently supported: vobiz." });
-    }
-    const authId = String(callProvider.authId || "").trim();
-    const authToken = String(callProvider.authToken || "").trim();
-    const phoneNumber = String(callProvider.phoneNumber || "").trim();
-    if (!authId || !authToken || !phoneNumber) {
-      return res.status(400).json({ error: "Vobiz auth ID, auth token, and phone number are required." });
-    }
-    if (!(await db.isNumberAvailable(phoneNumber, null))) {
-      return res.status(409).json({ error: "This call-provider number is already assigned to another organization." });
-    }
-    const { data: existingCallChannel } = await require("../db/client")
-      .from("channels").select("org_id").eq("type", provider).eq("external_id", phoneNumber).limit(1).maybeSingle();
-    if (existingCallChannel) {
-      return res.status(409).json({ error: "This call-provider number is already connected to another organization." });
+    // A call-provider channel is only required when the organization is
+    // explicitly billed for AI + Call Provider. For AI-only organizations,
+    // the frontend intentionally omits callProvider and the workspace should
+    // be created without a Vobiz number/channel.
+    let provider = null;
+    let validatedCallProvider = null;
+    if (chargeScope === "ai_and_call_provider") {
+      if (!callProvider || typeof callProvider !== "object") {
+        return res.status(400).json({ error: "Call provider configuration is required when Charge Scope is AI + Call Provider." });
+      }
+      provider = String(callProvider.provider || "vobiz").trim().toLowerCase();
+      if (provider !== "vobiz") {
+        return res.status(400).json({ error: "Unsupported call provider. Currently supported: vobiz." });
+      }
+      const authId = String(callProvider.authId || "").trim();
+      const authToken = String(callProvider.authToken || "").trim();
+      const phoneNumber = String(callProvider.phoneNumber || "").trim();
+      if (!authId || !authToken || !phoneNumber) {
+        return res.status(400).json({ error: "Vobiz auth ID, auth token, and phone number are required." });
+      }
+      if (!(await db.isNumberAvailable(phoneNumber, null))) {
+        return res.status(409).json({ error: "This call-provider number is already assigned to another organization." });
+      }
+      const { data: existingCallChannel } = await require("../db/client")
+        .from("channels").select("org_id").eq("type", provider).eq("external_id", phoneNumber).limit(1).maybeSingle();
+      if (existingCallChannel) {
+        return res.status(409).json({ error: "This call-provider number is already connected to another organization." });
+      }
+      validatedCallProvider = { provider, authId, authToken, phoneNumber };
     }
 
     // Validate the external project before creating the CRM organization so a
@@ -374,7 +383,7 @@ router.post("/organizations", async (req, res) => {
         location: gcpProject.location,
         credentialsEncrypted: validatedGcp.credentialsEncrypted,
       },
-      callProvider: { provider, authId, authToken, phoneNumber },
+      callProvider: validatedCallProvider,
       billingMethod,
       chargeScope,
       initialRechargeAmountInr: initialRecharge,
@@ -422,7 +431,8 @@ router.post("/organizations", async (req, res) => {
     await auditLog.record(null, { userId: req.userId, userEmail: req.userEmail },
       "create_organization", "organization", org.id, {
         name, workspaceName, adminEmail, gcpProjectMode: "existing", gcpProjectId: validatedGcp.project.projectId,
-        callProvider: provider, callProviderPhoneNumber: phoneNumber,
+        callProvider: validatedCallProvider?.provider || null,
+        callProviderPhoneNumber: validatedCallProvider?.phoneNumber || null,
         billingMethod, chargeScope, initialRechargeAmountInr: initialRecharge
       });
 
