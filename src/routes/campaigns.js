@@ -128,7 +128,7 @@ router.post("/dialer-tasks/sync", requireAuth, async (req, res) => {
     const byId = new Map(existing.map((task) => [task.id, task]));
     const runtimeFields = [
       "autoDialEnabled", "autoDialStatus", "autoDialStartedAt", "nextDialAt",
-      "currentLeadId", "currentProviderCallSid", "currentProvider", "currentCallStartedAt",
+      "currentLeadId", "currentProviderCallSid", "currentProvider", "currentCallStartedAt", "autoDialRunId",
     ];
     const merged = incoming.map((task) => {
       const current = byId.get(task.id);
@@ -215,6 +215,7 @@ router.post("/dialer-tasks/:id/auto-dial/start", requireAuth, async (req, res) =
       autoDialEnabled: true,
       autoDialStatus: "waiting",
       autoDialStartedAt: new Date().toISOString(),
+      autoDialRunId: require("crypto").randomUUID(),
       nextDialAt: new Date().toISOString(), // dial immediately on the next poll tick
     };
     if (req.body && req.body.outboundNumber) patch.outboundNumber = req.body.outboundNumber;
@@ -253,6 +254,7 @@ router.post("/dialer-tasks/:id/auto-dial/stop", requireAuth, async (req, res) =>
     const updated = await db.patch("dialertasks", req.orgId, req.params.id, {
       autoDialEnabled: false,
       autoDialStatus: "paused",
+      autoDialRunId: null,
     });
 
     if (task.currentProviderCallSid) {
