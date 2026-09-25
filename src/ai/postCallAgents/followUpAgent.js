@@ -28,6 +28,7 @@ const { generateStructured } = require("./shared");
 const { getCallerTimezone } = require("../../lib/callerTimezone");
 const { nowInTimezone, zonedTimeToUtc } = require("../../lib/timezoneConvert");
 const db = require("../../db/repository");
+const { deriveTranscriptSignals } = require("./decisionEngine");
 
 const FollowUpSchema = z.object({
   callbackRequested: z.boolean().default(false),
@@ -102,22 +103,15 @@ async function extractFollowUp(
   // never let a weak model classification turn the answered call into
   // "No Answer". If no caller time was supplied, use the configured callback
   // retry policy time rather than inventing a clock time.
-  const callerTurns = String(transcript || "")
-    .split(/\n+/)
-    .filter((line) => /^Caller\s*:/i.test(line))
-    .map((line) => line.replace(/^Caller\s*:\s*/i, "").trim())
-    .join(" ");
-  const explicitCallback = /\b(call(?: me)? back|callback|call again|ring me|contact me later|speak later)\b/i.test(callerTurns);
-  const busyRequest = /\b(i['’]?m|i am|we are|we're|currently)?\s*busy\b|\bnot a good time\b|\bcan(?:not|'t) talk\b|\bunable to talk\b/i.test(callerTurns);
+  const signals = deriveTranscriptSignals(transcript);
+  const { callerText, explicitCallback, busyRequest, callerSuppliedTime, callerSpoke } = signals;
 
-  if ((explicitCallback || busyRequest) && callAnswered) {
+  if ((explicitCallback || busyRequest) && callAnswered && callerSpoke) {
     callbackRequested = true;
 
     // Never trust a model-generated time unless the CALLER actually used
     // a time expression. This prevents the model from taking a time from an
     // Agent sentence or inventing one when the caller only said "busy".
-    const callerSuppliedTime = /\b(?:in\s+\d+\s*(?:minutes?|mins?|hours?|hrs?)|(?:today|tomorrow|tonight|morning|afternoon|evening)|at\s+\d{1,2}(?::\d{2})?\s*(?:am|pm)?|\b\d{1,2}\s*(?:am|pm)\b)\b/i.test(callerTurns);
-
     if (!callerSuppliedTime) {
       const policyFields = db.computeRetryFields(1, db.DEFAULT_RETRY_POLICY, callerPhone);
       callbackTime = policyFields.nextRetryAt || null;
