@@ -58,11 +58,16 @@ async function extractFollowUp(
 
   const timeZone = getCallerTimezone(callerPhone);
   const template = await getEffectivePrompt(orgId, "follow-up-safety-net");
+  // Older organization-specific prompt overrides may not contain the new
+  // placeholders. Always append the mandatory action policy and current
+  // context so legacy overrides cannot re-enable the old default callback
+  // or callback-vs-enquiry suppression behavior.
   const prompt = template
     .replace("{callerNow}", nowInTimezone(timeZone))
     .replace("{sentiment}", sentiment == null ? "null" : String(sentiment))
     .replace("{summary}", summary || "(No summary available.)")
-    .replace("{transcript}", transcript);
+    .replace("{transcript}", transcript)
+    + `\n\nMANDATORY SCHEDULING POLICY (overrides legacy wording):\n- Only schedule a callback when the caller explicitly wants a callback AND gives a usable time. Never invent a time and never default to two hours.\n- "later", "sometime", or "whenever" without a time means no callback.\n- No-answer, silence, wrong-number, and answering-machine calls never create conversational callbacks or enquiries.\n- Enquiry means only a meaningful caller question/request that the live agent genuinely could not answer or resolve. If the agent answered it, no enquiry.\n- A valid callback and a valid unresolved enquiry may both exist on the same answered call.\n- Sentiment ${sentiment == null ? "null" : sentiment} is context only; do not turn busy into Negative.\n\nCURRENT CALLER LOCAL TIME: ${nowInTimezone(timeZone)}\nCURRENT SENTIMENT: ${sentiment == null ? "null" : sentiment}\nCURRENT SUMMARY: ${summary || "(none)"}`;
 
   const result = await generateStructured({
     label: "scheduling-enquiry",
