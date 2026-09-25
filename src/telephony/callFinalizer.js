@@ -310,7 +310,7 @@ async function finalizeCallRecord({
   const callerWordCount = mergedTranscriptLines
     .filter(l => l.role === "user")
     .reduce((sum, l) => sum + l.text.trim().split(/\s+/).filter(Boolean).length, 0);
-  const callAnswered = !isMachineDetected && callerWordCount >= 4;
+  const callAnswered = !isMachineDetected && callerWordCount > 0;
 
   const { leadId, resolvedLeadName } = await matchContact(orgId, callId, callerNumber, direction, extractedCallerName);
 
