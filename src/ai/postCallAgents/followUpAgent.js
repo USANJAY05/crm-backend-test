@@ -113,16 +113,23 @@ async function extractFollowUp(
   if ((explicitCallback || busyRequest) && callAnswered) {
     callbackRequested = true;
 
-    if (!callbackTime) {
+    // Never trust a model-generated time unless the CALLER actually used
+    // a time expression. This prevents the model from taking a time from an
+    // Agent sentence or inventing one when the caller only said "busy".
+    const callerSuppliedTime = /\b(?:in\s+\d+\s*(?:minutes?|mins?|hours?|hrs?)|(?:today|tomorrow|tonight|morning|afternoon|evening)|at\s+\d{1,2}(?::\d{2})?\s*(?:am|pm)?|\b\d{1,2}\s*(?:am|pm)\b)\b/i.test(callerTurns);
+
+    if (!callerSuppliedTime) {
       const policyFields = db.computeRetryFields(1, db.DEFAULT_RETRY_POLICY, callerPhone);
       callbackTime = policyFields.nextRetryAt || null;
     }
 
-    // We did not receive an explicit caller time. Keep this false so the
-    // stored callback reason does not claim that the caller supplied a time.
-    if (!result.callbackTimeMentioned && !result.callbackRelativeMinutes && !result.callbackLocalDateTime) {
-      // callbackTime is now the configured policy time, not an invented
-      // caller-provided clock time.
+    // callbackTimeMentioned describes only what the Caller actually said.
+    // The configured fallback time is an application schedule, not a caller
+    // supplied time.
+    if (!callerSuppliedTime) {
+      result.callbackTimeMentioned = false;
+      result.callbackRelativeMinutes = null;
+      result.callbackLocalDateTime = null;
     }
   }
 
