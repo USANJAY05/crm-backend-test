@@ -31,7 +31,14 @@ function normalizeQuestions(questions) {
   return (questions || []).map((q) =>
     typeof q === "string"
       ? { label: q, question: q, dataType: undefined }
-      : { label: q.label || q.question, question: q.question || q.label, dataType: q.dataType }
+      : {
+          label: q.label || q.question,
+          question: q.question || q.label,
+          dataType: q.dataType,
+          // Workflow questions are mandatory by default. Only an explicit
+          // optional flag makes a question skippable.
+          optional: q.optional === true || q.required === false,
+        }
   );
 }
 
@@ -100,4 +107,62 @@ async function extractWorkflowAnswers(transcript, questions, orgId = null, onUsa
   });
 }
 
-module.exports = { normalizeQuestions, extractWorkflowAnswers };
+
+
+function isUsableWorkflowAnswer(answer) {
+  if (answer == null) return false;
+  const value = String(answer).trim();
+  if (!value) return false;
+  return !/^(?:unknown|n\/a|na|not provided|not answered|no answer|unanswered|null|undefined)$/i.test(value);
+}
+
+/**
+ * Strict workflow completion gate.
+ *
+ * Every workflow question is mandatory by default. A question is skippable
+ * only when its definition explicitly has optional=true or required=false.
+ * Answers must come from the extracted/saved caller answers; the validator
+ * never infers missing values.
+ */
+function validateWorkflowAnswers(questions, answers) {
+  const normalized = normalizeQuestions(questions);
+  if (!normalized.length) {
+    return { complete: true, missingQuestions: [], requiredQuestions: [] };
+  }
+
+  const rows = Array.isArray(answers) ? answers : [];
+  const byQuestion = new Map();
+  const byLabel = new Map();
+
+  for (const row of rows) {
+    if (!row) continue;
+    const answer = row.answer;
+    if (row.question) byQuestion.set(String(row.question).trim().toLowerCase(), answer);
+    if (row.label) byLabel.set(String(row.label).trim().toLowerCase(), answer);
+  }
+
+  const missingQuestions = normalized
+    .filter((q) => !q.optional)
+    .filter((q) => {
+      const answer = byQuestion.get(String(q.question || "").trim().toLowerCase())
+        ?? byLabel.get(String(q.label || "").trim().toLowerCase());
+      return !isUsableWorkflowAnswer(answer);
+    })
+    .map((q) => ({
+      label: q.label,
+      question: q.question,
+      dataType: q.dataType || null,
+    }));
+
+  return {
+    complete: missingQuestions.length === 0,
+    missingQuestions,
+    requiredQuestions: normalized.filter((q) => !q.optional).map((q) => ({
+      label: q.label,
+      question: q.question,
+      dataType: q.dataType || null,
+    })),
+  };
+}
+
+module.exports = { normalizeQuestions, extractWorkflowAnswers, validateWorkflowAnswers, isUsableWorkflowAnswer };
