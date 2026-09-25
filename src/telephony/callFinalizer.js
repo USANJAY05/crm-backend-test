@@ -157,10 +157,29 @@ async function uploadRecording(provider, callId, wavBuffer) {
 // one-word lines.
 function mergeTranscriptLines(transcriptLines) {
   const merged = [];
-  for (const l of transcriptLines) {
+  for (const raw of (transcriptLines || [])) {
+    if (!raw) continue;
+    const role = raw.role === "user" ? "user" : "model";
+    const text = String(raw.text || "").replace(/\\s+/g, " ").trim();
+    if (!text) continue;
     const last = merged[merged.length - 1];
-    if (last && last.role === l.role) last.text += l.text;
-    else merged.push({ role: l.role, text: l.text });
+    if (last && last.role === role) {
+      const a = last.text;
+      const b = text;
+      if (a === b || a.toLowerCase() === b.toLowerCase()) continue;
+      const lowerA = a.toLowerCase();
+      const lowerB = b.toLowerCase();
+      if (lowerA.endsWith(lowerB)) continue;
+      if (lowerB.startsWith(lowerA)) { last.text = b; continue; }
+      let overlap = 0;
+      const max = Math.min(a.length, b.length);
+      for (let n = max; n >= 8; n--) {
+        if (lowerA.slice(-n) === lowerB.slice(0, n)) { overlap = n; break; }
+      }
+      last.text = overlap ? a + b.slice(overlap) : a + " " + b;
+    } else {
+      merged.push({ role, text });
+    }
   }
   return merged;
 }
@@ -368,6 +387,10 @@ async function finalizeCallRecord({
     log.warn(`⚠️ [${provider}] workflow response lookup failed; continuing without saved answers:`, err.message);
   }
 
+  log.info(
+    `🔧 [${provider}] Post-call inputs: transcriptLines=${transcriptLines?.length || 0}, normalizedTranscriptLines=${mergedTranscriptLines.length}, workflowQuestions=${workflowQuestions?.length || 0}, callerWordCount=${callerWordCount}`
+  );
+
   const workflowPromise = (workflowQuestions?.length && transcriptLines.length > 0)
     ? (async () => {
         const startedAt = Date.now();
@@ -417,7 +440,7 @@ async function finalizeCallRecord({
           log.error(`❌ [${provider}] workflow answer extraction failed; continuing call finalization:`, err.message);
         }
       })()
-    : Promise.resolve();
+    : (log.info(`⏭️ [${provider}] Workflow agent skipped: no workflow questions assigned to this call.`), Promise.resolve());
 
   const summaryPromise = transcriptLines.length > 0
     ? (async () => {
@@ -828,6 +851,10 @@ async function finalizeCallRecord({
   // than a parallel one-off cost calculation. Fire-and-forget, same as
   // the metering calls above: usage tracking must never fail call
   // finalization.
+  log.info(
+    `📊 [${provider}] Post-call usage total: inputTokens=${postCallUsage.inputTokens}, outputTokens=${postCallUsage.outputTokens}`
+  );
+
   if (postCallUsage.inputTokens > 0 || postCallUsage.outputTokens > 0) {
     geminiUsageTracker.startUsageSession({
       orgId, callId, provider: "post-call-agents", model: postCallAgents.MODEL, costProviderKey: "gemini-postcall",

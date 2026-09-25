@@ -28,19 +28,24 @@ const QAExtractionSchema = z.object({
 // own text and gets no dataType, so legacy callers see identical output
 // to before dataType existed.
 function normalizeQuestions(questions) {
-  return (questions || []).map((q) =>
-    typeof q === "string"
+  const seen = new Set();
+  const normalized = [];
+  for (const q of (questions || [])) {
+    const item = typeof q === "string"
       ? { label: q, question: q, dataType: undefined }
       : {
           label: q.label || q.question,
           question: q.question || q.label,
           dataType: q.dataType,
           options: Array.isArray(q.options) ? q.options : (Array.isArray(q.choices) ? q.choices : []),
-          // Workflow questions are mandatory by default. Only an explicit
-          // optional flag makes a question skippable.
           optional: q.optional === true || q.required === false,
-        }
-  );
+        };
+    const key = String(item.question || item.label || "").trim().replace(/\\s+/g, " ").toLowerCase();
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    normalized.push(item);
+  }
+  return normalized;
 }
 
 // Per-type formatting instructions given to the model alongside each
