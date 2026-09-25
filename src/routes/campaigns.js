@@ -113,7 +113,7 @@ router.get("/dialer-tasks", requireAuth, async (req, res) => {
     }));
     res.json(resolved.map((task) => ({
       ...task,
-      retryConfig: task.callResults?.__retryConfig || db.DEFAULT_RETRY_POLICY,
+      retryConfig: db.normalizeRetryPolicy(task.retryConfig || db.DEFAULT_RETRY_POLICY),
     })));
   } catch (err) { res.status(500).json({ error: safeErrorMessage(err) }); }
 });
@@ -133,12 +133,9 @@ router.post("/dialer-tasks/sync", requireAuth, async (req, res) => {
     const merged = incoming.map((task) => {
       const current = byId.get(task.id);
       const copy = { ...task };
-      const retryConfig = db.normalizeRetryPolicy(
-        task.retryConfig || task.callResults?.__retryConfig || current?.callResults?.__retryConfig || db.DEFAULT_RETRY_POLICY
+      copy.retryConfig = db.normalizeRetryPolicy(
+        task.retryConfig || current?.retryConfig || db.DEFAULT_RETRY_POLICY
       );
-      copy.callResults = { ...(copy.callResults || {}) };
-      copy.callResults.__retryConfig = retryConfig;
-      delete copy.retryConfig;
       if (current) {
         for (const field of runtimeFields) {
           if (Object.prototype.hasOwnProperty.call(current, field)) copy[field] = current[field];
@@ -170,13 +167,9 @@ router.patch("/dialer-tasks/:id", requireAuth, async (req, res) => {
 router.post("/dialer-tasks", requireAuth, async (req, res) => {
   try {
     const body = { ...(req.body || {}) };
-    const retryConfig = db.normalizeRetryPolicy(
-      body.retryConfig || body.callResults?.__retryConfig || db.DEFAULT_RETRY_POLICY
-    );
-    body.callResults = { ...(body.callResults || {}), __retryConfig: retryConfig };
-    delete body.retryConfig;
+    body.retryConfig = db.normalizeRetryPolicy(body.retryConfig || db.DEFAULT_RETRY_POLICY);
     const created = await db.create("dialertasks", req.orgId, body);
-    res.status(201).json({ ...created, retryConfig });
+    res.status(201).json({ ...created, retryConfig: body.retryConfig });
   } catch (err) { res.status(500).json({ error: safeErrorMessage(err) }); }
 });
 
