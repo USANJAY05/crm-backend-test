@@ -15,6 +15,7 @@ const auditLog = require("./auditLog");
 const featureFlags = require("./featureFlags");
 const dataRetention = require("./dataRetention");
 const storage = require("../storage");
+const callBalancePolicy = require("./callBalancePolicy");
 const { getLogger } = require("../observability/logger");
 const log = getLogger("platform.admin");
 
@@ -269,6 +270,32 @@ async function getOrganizationDetail(orgId) {
   };
 }
 
+async function getCallBalanceDefaults() {
+  return callBalancePolicy.getIndustryDefaults();
+}
+
+async function setCallBalanceDefault(actor, industry, input) {
+  const result = await callBalancePolicy.setIndustryDefault(industry, input);
+  await auditLog.record(null, actor, "platform.billing.call_balance_default.update", "industry_call_balance", industry, { policy: result });
+  return result;
+}
+
+async function getOrganizationCallBalance(orgId) {
+  return callBalancePolicy.getOrganizationPolicy(orgId);
+}
+
+async function setOrganizationCallBalance(actor, orgId, input) {
+  const result = await callBalancePolicy.setOrganizationPolicy(orgId, input);
+  await auditLog.record(null, actor, "platform.billing.organization_call_balance.update", "organization_call_balance", orgId, { policy: result.override });
+  return result;
+}
+
+async function clearOrganizationCallBalance(actor, orgId) {
+  const result = await callBalancePolicy.clearOrganizationPolicy(orgId);
+  await auditLog.record(null, actor, "platform.billing.organization_call_balance.reset", "organization_call_balance", orgId, { effective: result.effective });
+  return result;
+}
+
 async function getPricing() {
   return {
     // Derived live from the active call provider on the Cost page — see
@@ -405,7 +432,7 @@ async function listCostArchive() {
 
 module.exports = {
   listOrganizations, listUsers, listAuditLog, getStats, getTimeSeries, getOrganizationDetail,
-  getPricing, updatePricing, getFeatureFlags, updateFeatureFlag, deleteOrganization,
+  getPricing, updatePricing, getCallBalanceDefaults, setCallBalanceDefault, getOrganizationCallBalance, setOrganizationCallBalance, clearOrganizationCallBalance, getFeatureFlags, updateFeatureFlag, deleteOrganization,
   listCostProviders, upsertCostProvider, listCostArchive,
   getFeatureGroups, saveFeatureGroup, deleteFeatureGroup, sanitizeFeatureKeys,
   getDataRetentionDefaults, setDataRetentionDefaults, getOrganizationDataRetention,
