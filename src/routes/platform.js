@@ -291,7 +291,8 @@ router.post("/organizations", async (req, res) => {
     const {
       name, workspaceName, industry, subscriptionPlan, adminEmail, adminName, featureFlags,
       gcpProjectMode = "existing", gcpProject, callProvider,
-      billingMethod = "pay_as_you_go", chargeScope = "ai_only", initialRechargeAmountInr = 0
+      billingMethod = "pay_as_you_go", chargeScope = "ai_only", initialRechargeAmountInr = 0,
+      dataRetentionMode = "default", dataRetentionOverrides = {}, backup = null
     } = req.body || {};
     if (!name || !workspaceName) return res.status(400).json({ error: "name and workspaceName are required" });
 
