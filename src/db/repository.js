@@ -148,6 +148,7 @@ const ENTITIES = {
       // per-request "selected number" the way a frontend-initiated call
       // does, so this is the one place it has to live.
       outboundNumber: "outbound_number",
+      retryConfig: "retry_config",
       // See mysql.js's dialer_tasks.workflow_id column comment — was
       // never persisted at all before, only living in frontend memory.
       workflowId: "workflow_id"
