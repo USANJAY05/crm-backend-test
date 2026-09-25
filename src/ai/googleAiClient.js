@@ -50,7 +50,7 @@ const studioApiKey = process.env.GEMINI_API_KEY || "";
 // it is NOT initialized with GOOGLE_CLOUD_PROJECT and is never used for
 // organization-scoped calls. Studio mode may use its API key for explicitly
 // non-tenant tooling.
-const genai = new GoogleGenAI({ apiKey: studioApiKey });
+const genai = isVertex ? {} : new GoogleGenAI({ apiKey: studioApiKey });
 
 const vertexClients = new Map();
 
