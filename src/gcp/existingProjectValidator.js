@@ -29,8 +29,14 @@ function validateProjectId(projectId) {
 }
 
 async function validateExistingProject({ projectId, credentials, location }) {
-  const id = validateProjectId(projectId);
   const creds = parseCredentials(credentials);
+  // Prefer the project_id embedded in the service-account JSON. The optional
+  // projectId argument is retained for backwards compatibility with older
+  // callers, but a supplied value must match the credential's project.
+  const id = validateProjectId(creds.project_id);
+  if (projectId !== undefined && projectId !== null && String(projectId).trim() && validateProjectId(projectId) !== id) {
+    throw new Error("The Google Cloud Project ID does not match the project_id in the service-account JSON.");
+  }
   if (!String(location || "").trim()) throw new Error("Google Cloud region/location is required.");
 
   let auth;
