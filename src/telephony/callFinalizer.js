@@ -313,20 +313,9 @@ async function finalizeCallRecord({
 
   let { leadId, resolvedLeadName } = await matchContact(orgId, callId, callerNumber, direction, extractedCallerName);
 
-  // Advance contact/campaign -> lead the moment a call to this contact is
-  // actually answered and engaged with — the second automatic half of the
-  // universal pipeline-stage progression (see mysql.js's
-  // leads.pipeline_stage comment; the other automatic step is
-  // replaceDialerTasks's ->campaign). Never regresses a contact already
-  // past this stage (opportunity/client), and fire-and-forget — a
-  // pipeline-stage update is not worth failing call finalization over.
-  if (leadId && callAnswered) {
-    db.getLeadById(orgId, leadId).then(async (current) => {
-      if (current && (!current.pipelineStage || current.pipelineStage === "contact" || current.pipelineStage === "campaign")) {
-        await db.patch("leads", orgId, leadId, { pipelineStage: "lead" }).catch(() => {});
-      }
-    }).catch(() => {});
-  }
+  // Lead promotion is intentionally deferred until after sentiment,
+  // callback, and enquiry decisions. Answering a call alone is not enough
+  // to move a contact into Leads.
 
   // Post-call action decisions happen AFTER the descriptive summary so the
   // Scheduling & Enquiry Agent can see both summary and sentiment. Only that
