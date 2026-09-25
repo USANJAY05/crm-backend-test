@@ -120,7 +120,11 @@ function resolvePostCallOutcome({
     callbackStatus: callbackRequested ? "scheduled" : "none",
     enquiryStatus: enquiryRequested ? "open" : "none",
     callbackTimeToStore: callbackRequested ? usableCallbackTime(decision.callbackTime) : null,
-    callbackReasonToStore: callbackRequested ? "Caller requested a callback at a specific time." : null,
+    callbackReasonToStore: callbackRequested
+      ? (decision.callbackTimeMentioned
+        ? "Caller requested a callback at a specific time."
+        : "Caller requested a callback; scheduled using the configured callback policy.")
+      : null,
     enquirySummary: enquiryRequested ? decision.enquirySummary : null,
     callerName: decision.callerName || null,
     retryFieldsToSave,

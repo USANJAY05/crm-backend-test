@@ -27,6 +27,7 @@ const { getEffectivePrompt } = require("../systemAgents");
 const { generateStructured } = require("./shared");
 const { getCallerTimezone } = require("../../lib/callerTimezone");
 const { nowInTimezone, zonedTimeToUtc } = require("../../lib/timezoneConvert");
+const db = require("../../db/repository");
 
 const FollowUpSchema = z.object({
   callbackRequested: z.boolean().default(false),
@@ -96,15 +97,53 @@ async function extractFollowUp(
     if (!callbackTime) callbackRequested = false;
   }
 
-  const busyOnly = /busy|not a good time|cannot talk|can't talk/i.test(transcript);
-  if (busyOnly && !callbackTime) {
+  // Deterministic safety net: if the Caller explicitly asked to be called
+  // back, or said they are busy/unavailable and wants the conversation later,
+  // never let a weak model classification turn the answered call into
+  // "No Answer". If no caller time was supplied, use the configured callback
+  // retry policy time rather than inventing a clock time.
+  const callerTurns = String(transcript || "")
+    .split(/\n+/)
+    .filter((line) => /^Caller\s*:/i.test(line))
+    .map((line) => line.replace(/^Caller\s*:\s*/i, "").trim())
+    .join(" ");
+  const explicitCallback = /\b(call(?: me)? back|callback|call again|ring me|contact me later|speak later)\b/i.test(callerTurns);
+  const busyRequest = /\b(i['’]?m|i am|we are|we're|currently)?\s*busy\b|\bnot a good time\b|\bcan(?:not|'t) talk\b|\bunable to talk\b/i.test(callerTurns);
+
+  if ((explicitCallback || busyRequest) && callAnswered) {
+    callbackRequested = true;
+
+    // Never trust a model-generated time unless the CALLER actually used
+    // a time expression. This prevents the model from taking a time from an
+    // Agent sentence or inventing one when the caller only said "busy".
+    const callerSuppliedTime = /\b(?:in\s+\d+\s*(?:minutes?|mins?|hours?|hrs?)|(?:today|tomorrow|tonight|morning|afternoon|evening)|at\s+\d{1,2}(?::\d{2})?\s*(?:am|pm)?|\b\d{1,2}\s*(?:am|pm)\b)\b/i.test(callerTurns);
+
+    if (!callerSuppliedTime) {
+      const policyFields = db.computeRetryFields(1, db.DEFAULT_RETRY_POLICY, callerPhone);
+      callbackTime = policyFields.nextRetryAt || null;
+    }
+
+    // callbackTimeMentioned describes only what the Caller actually said.
+    // The configured fallback time is an application schedule, not a caller
+    // supplied time.
+    if (!callerSuppliedTime) {
+      result.callbackTimeMentioned = false;
+      result.callbackRelativeMinutes = null;
+      result.callbackLocalDateTime = null;
+    }
+  }
+
+  // If the caller neither requested a callback nor said they were busy/
+  // unavailable, do not create a callback merely because the model guessed
+  // one. A callback still requires explicit caller intent.
+  if (!explicitCallback && !busyRequest && !callbackTime) {
     callbackRequested = false;
     callbackTime = null;
   }
 
   return {
     callbackRequested,
-    callbackTimeMentioned: callbackRequested && !!result.callbackTimeMentioned,
+    callbackTimeMentioned: !!result.callbackTimeMentioned,
     callbackTime,
     enquiryRequested: !!result.enquiryRequested,
     enquirySummary: result.enquirySummary || null,
