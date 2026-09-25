@@ -50,8 +50,19 @@ function resolveSpecificCallbackTime(localDateTime, timeZone, callerText) {
   // caller's timezone. If 2 PM has already passed today, schedule tomorrow
   // at the same wall-clock time instead of rejecting the callback.
   if (resolved.getTime() <= Date.now() && hasClockTime(callerText)) {
+    const parts = String(localDateTime).match(
+      /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})$/
+    );
+    if (!parts) return null;
     const nextDayLocal = new Date(
-      Date.parse(String(localDateTime).replace("Z", "Z")) + 24 * 60 * 60 * 1000
+      Date.UTC(
+        Number(parts[1]),
+        Number(parts[2]) - 1,
+        Number(parts[3]) + 1,
+        Number(parts[4]),
+        Number(parts[5]),
+        Number(parts[6])
+      )
     );
     const yyyy = nextDayLocal.getUTCFullYear();
     const mm = String(nextDayLocal.getUTCMonth() + 1).padStart(2, "0");
