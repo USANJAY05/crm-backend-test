@@ -321,6 +321,11 @@ async function finalizeCallRecord({
     inputTokens: Number(sentimentInputTokens) || 0,
     outputTokens: Number(sentimentOutputTokens) || 0,
   };
+  if (transcriptLines?.length) {
+    log.info(
+      `🧩 [${provider}] Post-call pipeline version=${postCallAgents.POST_CALL_PIPELINE_VERSION || "unknown"}`
+    );
+  }
   const accumulateUsage = ({ inputTokens = 0, outputTokens = 0 } = {}) => {
     postCallUsage.inputTokens += Number(inputTokens) || 0;
     postCallUsage.outputTokens += Number(outputTokens) || 0;

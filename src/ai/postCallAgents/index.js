@@ -23,7 +23,7 @@ const { analyzeSentiment } = require("./sentimentAgent");
 const { generateCallSummary } = require("./summaryAgent");
 const { normalizeQuestions, extractWorkflowAnswers } = require("./workflowAnswersAgent");
 const { extractFollowUp } = require("./followUpAgent");
-const { MODEL } = require("./shared");
+const { MODEL, POST_CALL_PIPELINE_VERSION } = require("./shared");
 
 module.exports = {
   analyzeSentiment,
@@ -32,4 +32,5 @@ module.exports = {
   extractFollowUp,
   normalizeQuestions,
   MODEL, // the model every post-call agent shares — see callFinalizer.js's usage tracking
+  POST_CALL_PIPELINE_VERSION,
 };
