@@ -99,7 +99,32 @@ async function upsertChannel(orgId, type, externalId, config = {}) {
   requireDb();
   const { safeConfig, credentials } = splitChannelConfig(config);
   const credentialsEncrypted = Object.keys(credentials).length ? encryptJson(credentials) : null;
-  const { data: existing } = await db.supabase.from("channels").select("id").eq("org_id", orgId).eq("type", type).maybeSingle();
+  // The DB constraint is UNIQUE(type, external_id), not org_id + type.
+  // Always resolve the exact channel first. Otherwise a stale/existing Vobiz
+  // row for this phone can pass the org-scoped lookup and the subsequent
+  // INSERT will fail with a duplicate-key 500.
+  const { data: exactChannel, error: exactErr } = await db.supabase
+    .from("channels")
+    .select("id, org_id")
+    .eq("type", type)
+    .eq("external_id", externalId)
+    .maybeSingle();
+  if (exactErr) throw new Error(`[channelsEngine.upsertChannel] ${exactErr.message}`);
+  if (exactChannel && exactChannel.org_id !== orgId) {
+    const err = new Error("This channel number is already assigned to another organization.");
+    err.statusCode = 409;
+    throw err;
+  }
+
+  // Keep the existing org/type behavior for reconnecting an org's channel
+  // with a new external id.
+  const { data: existing, error: existingErr } = await db.supabase
+    .from("channels")
+    .select("id")
+    .eq("org_id", orgId)
+    .eq("type", type)
+    .maybeSingle();
+  if (existingErr) throw new Error(`[channelsEngine.upsertChannel] ${existingErr.message}`);
 
   const payload = {
     external_id: externalId,
@@ -108,11 +133,12 @@ async function upsertChannel(orgId, type, externalId, config = {}) {
     status: "connected"
   };
 
-  if (existing) {
+  const rowToUpdate = exactChannel || existing;
+  if (rowToUpdate) {
     const { data, error } = await db.supabase
       .from("channels")
       .update(payload)
-      .eq("id", existing.id)
+      .eq("id", rowToUpdate.id)
       .select()
       .single();
     if (error) throw new Error(`[channelsEngine.upsertChannel] ${error.message}`);
